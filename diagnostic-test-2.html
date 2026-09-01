@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Diagnostic Test 2</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+<div id="root"></div>
+<div id="diag" style="display:none; position:fixed; inset:0; background:#000; color:#ff6b6b; font-family:monospace; font-size:16px; padding:20px; white-space:pre-wrap; z-index:9999;"></div>
+<script>
+  window.addEventListener("error", function (e) {
+    const diag = document.getElementById("diag");
+    diag.style.display = "block";
+    diag.textContent += "[error] " + (e.message || e) + "\n";
+  });
+</script>
+
+<!-- The JSX source sits inert in a non-executing script tag (type="text/plain"), so the
+     browser never tries to run it directly. We pull its text out, transform it ourselves
+     with the CLASSIC runtime explicitly forced (no react/jsx-runtime import injected),
+     then inject and run the result. -->
+<script id="app-source" type="text/plain">
+  const { useState } = React;
+  function TestApp() {
+    const [count, setCount] = useState(0);
+    return (
+      <div className="p-8 bg-[#12151C] text-white min-h-screen">
+        <h1 className="text-2xl mb-4">Diagnostic test 2 — classic runtime forced. If you see this, the fix works.</h1>
+        <button
+          className="px-4 py-2 bg-blue-600 rounded"
+          onClick={() => setCount(count + 1)}
+        >
+          Clicked {count} times
+        </button>
+      </div>
+    );
+  }
+  const root = ReactDOM.createRoot(document.getElementById("root"));
+  root.render(<TestApp />);
+</script>
+<script>
+  try {
+    const source = document.getElementById("app-source").textContent;
+    const output = Babel.transform(source, {
+      presets: [["react", { runtime: "classic" }]],
+    }).code;
+    const script = document.createElement("script");
+    script.textContent = output;
+    document.body.appendChild(script);
+  } catch (err) {
+    const diag = document.getElementById("diag");
+    diag.style.display = "block";
+    diag.textContent += "[transform error] " + (err && err.message ? err.message : err) + "\n";
+  }
+</script>
+</body>
+</html>
