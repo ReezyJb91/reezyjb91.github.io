@@ -1,0 +1,3022 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>The System</title>
+
+<!-- PWA / "Add to Home Screen" hints -->
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="The System" />
+<meta name="theme-color" content="#0B0D12" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%230B0D12'/%3E%3Cpolygon points='55,15 25,55 47,55 42,85 75,45 53,45' fill='%233DDBD9'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%230B0D12'/%3E%3Cpolygon points='55,15 25,55 47,55 42,85 75,45 53,45' fill='%233DDBD9'/%3E%3C/svg%3E" />
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- OneSignal — Tier 2 push notifications. Real App ID from the OneSignal dashboard. -->
+<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+<script>
+  window.OneSignalDeferred = window.OneSignalDeferred || [];
+  OneSignalDeferred.push(async function (OneSignal) {
+    await OneSignal.init({
+      appId: "7e76050a-ae75-495e-9878-b2230661b6a6",
+      notifyButton: { enable: false },
+    });
+  });
+</script>
+
+<style>
+  html, body, #root { height: 100%; margin: 0; background: #0B0D12; }
+  body { -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="diag" style="display:none; position:fixed; inset:0; background:#0B0D12; color:#ff6b6b; font-family:monospace; font-size:13px; padding:20px; white-space:pre-wrap; overflow:auto; z-index:9999;"></div>
+
+<script>
+  // Diagnostic error surface — if anything fails (Babel parse error, a runtime error in
+  // the app, a failed CDN load), show it as visible text instead of a silent blank page.
+  (function () {
+    const diag = document.getElementById("diag");
+    function showError(msg) {
+      diag.style.display = "block";
+      diag.textContent += msg + "\n\n";
+    }
+    window.addEventListener("error", function (e) {
+      showError("[error] " + (e.message || e) + (e.filename ? "\n  at " + e.filename + ":" + e.lineno + ":" + e.colno : ""));
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      showError("[unhandled promise rejection] " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+    });
+    // If nothing has rendered into #root after 6 seconds, say so explicitly rather than
+    // leaving a blank screen with no clue anything went wrong.
+    setTimeout(function () {
+      const root = document.getElementById("root");
+      if (root && root.children.length === 0 && diag.style.display === "none") {
+        showError("[diagnostic] Nothing rendered into #root after 6s, and no JS error was caught either. Likely a CDN script (React/Babel/Tailwind) failed to load — check your connection or try reloading.");
+      }
+    }, 6000);
+  })();
+</script>
+
+<script>
+  // window.storage polyfill — the original app was built against Claude's artifact
+  // persistence API, which doesn't exist in a normal browser. This mirrors the same
+  // async, Promise-based shape using localStorage, so the app code needed zero changes.
+  (function () {
+    const PREFIX = "system-engine:";
+    window.storage = {
+      get: async (key) => {
+        const raw = localStorage.getItem(PREFIX + key);
+        if (raw === null) return null;
+        return { key, value: raw };
+      },
+      set: async (key, value) => {
+        localStorage.setItem(PREFIX + key, value);
+        return { key, value };
+      },
+      delete: async (key) => {
+        localStorage.removeItem(PREFIX + key);
+        return { key, deleted: true };
+      },
+      list: async (prefix) => {
+        const keys = Object.keys(localStorage)
+          .filter((k) => k.startsWith(PREFIX + (prefix || "")))
+          .map((k) => k.slice(PREFIX.length));
+        return { keys, prefix };
+      },
+    };
+  })();
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ---- Icon components — small hand-built replacements for the lucide-react icons the
+// original app used (Zap, ShieldAlert, Lock, CheckCircle2, Circle, Store, Sparkles).
+// Same call signature (size, color, className) as lucide-react, so no call sites changed.
+function makeIcon(paths) {
+  return function Icon({ size = 24, color = "currentColor", className = "" }) {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={className}
+      >
+        {paths}
+      </svg>
+    );
+  };
+}
+
+const Zap = makeIcon(
+  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+);
+const ShieldAlert = makeIcon(
+  <>
+    <path d="M20 13c0 5-3.5 7.5-7.35 8.95a1 1 0 0 1-1.3 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+    <path d="M12 8v4" />
+    <path d="M12 16h.01" />
+  </>
+);
+const Lock = makeIcon(
+  <>
+    <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+  </>
+);
+const CheckCircle2 = makeIcon(
+  <>
+    <path d="M21.801 10A10 10 0 1 1 17 3.335" />
+    <path d="m9 11 3 3L22 4" />
+  </>
+);
+const Circle = makeIcon(<circle cx="12" cy="12" r="10" />);
+const Store = makeIcon(
+  <>
+    <path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7" />
+    <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+    <path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4" />
+    <path d="M2 7h20" />
+    <path d="M22 7v3a2 2 0 0 1-2 2 2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 16 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 12 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 8 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 4 12a2 2 0 0 1-2-2Z" />
+  </>
+);
+const Sparkles = makeIcon(
+  <>
+    <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+    <path d="M20 3v4" />
+    <path d="M22 5h-4" />
+    <path d="M4 17v2" />
+    <path d="M5 18H3" />
+  </>
+);
+
+
+// ---- Domain config: your 5 Life RPG domains, each mapped to a System stat colorway ----
+// ---- Avatar: base identity, separate from Shop cosmetics (which layer on top later) ----
+const GENDERS = ["Male", "Female", "Non-binary"];
+const SKIN_TONES = ["#FFE0BD", "#F1C27D", "#E0AC69", "#C68642", "#8D5524", "#4A2C1B"];
+const EYE_COLORS = ["#6F4E37", "#4A90D9", "#4CAF6D", "#A67B5B", "#9AA5B1", "#C48A3C"];
+const HAIR_COLORS = ["#1B1B1B", "#3B2417", "#6B4423", "#D4B483", "#8B4726", "#B0AFAF", "#EDEDED"];
+const HAIRSTYLES = ["Bald", "Buzzcut", "Short", "Medium", "Long", "Ponytail"];
+
+// ---- Shop: purely cosmetic, purchased with gold. Placeholder swatches stand in for real
+// art — the data model (own/equip, tiered ladders) is the real deliverable here. ----
+const HEAD_CATALOG = [
+  { id: "head1", label: "Circlet", color: "#8B5CF6", cost: 50 },
+  { id: "head2", label: "Hood", color: "#374151", cost: 120 },
+  { id: "head3", label: "Crown", color: "#FFD700", cost: 300 },
+];
+const UPPER_CATALOG = [
+  { id: "up1", label: "Tunic", color: "#2F855A", cost: 60 },
+  { id: "up2", label: "Cloak", color: "#742A2A", cost: 150 },
+  { id: "up3", label: "Plate", color: "#4A5568", cost: 350 },
+];
+const LOWER_CATALOG = [
+  { id: "low1", label: "Trousers", color: "#553C9A", cost: 60 },
+  { id: "low2", label: "Greaves", color: "#2C5282", cost: 150 },
+  { id: "low3", label: "Legguards", color: "#975A16", cost: 350 },
+];
+// Ladders — bought sequentially, one tier at a time, like the emblem ladder but purchased.
+const ACCESSORY_TIERS = [
+  { label: "Accessory I", cost: 75, color: "#F2A93B" },
+  { label: "Accessory II", cost: 200, color: "#E5484D" },
+  { label: "Accessory III", cost: 500, color: "#3DDBD9" },
+];
+const AURA_TIERS = [
+  { label: "Aura I", cost: 100, color: "#7EE8E6" },
+  { label: "Aura II", cost: 300, color: "#A855F7" },
+  { label: "Aura III", cost: 800, color: "#FFD700" },
+];
+
+const DOMAINS = [
+  { key: "financial", label: "FINANCIAL", color: "#2FBF71" },
+  { key: "physical", label: "PHYSICAL", color: "#E5484D" },
+  { key: "mental", label: "MENTAL", color: "#6366F1" },
+  { key: "relational", label: "RELATIONAL", color: "#F2A93B" },
+  { key: "social", label: "SOCIAL", color: "#A855F7" },
+  { key: "faith", label: "FAITH", color: "#3DDBD9" },
+];
+
+// ---- Single quest type for this prototype: the Daily Quest ----
+// Each task is tagged to the domain it feeds when checked off.
+// Relational = family. Social = personal/professional network — mirrors Relational's task shape.
+const DAILY_TASKS = [
+  { id: "t1", label: "100 push-ups, 100 sit-ups, 100 squats + 1 mile run", domain: "physical" },
+  { id: "t2", label: "Review all expenses for the day", domain: "financial" },
+  { id: "t3", label: "Work one skill or read one book — 30 min", domain: "mental" },
+  { id: "t4", label: "One intentional check-in (spouse/son)", domain: "relational" },
+  { id: "t6", label: "One intentional check-in (friend/colleague/network contact)", domain: "social" },
+  { id: "t5", label: "Read 1 chapter + pray", domain: "faith" },
+];
+
+// ---- Penalty pool: preset grueling challenges, mixed physical/mental so it's not always the same muscle ----
+// baseSeconds = forced minimum duration before "complete" can even be pressed (shortened for demo; real build = much longer floor)
+const PENALTY_POOL = [
+  { id: "p1", label: "100 burpees, unbroken sets", domain: "physical", baseSeconds: 15 * 60 },
+  { id: "p2", label: "20 min cold exposure + breath work", domain: "mental", baseSeconds: 20 * 60 },
+  { id: "p3", label: "5 mile run, tracked", domain: "physical", baseSeconds: 50 * 60 },
+  { id: "p4", label: "500-word written reflection: why the quest was missed", domain: "mental", baseSeconds: 15 * 60 },
+  { id: "p5", label: "200 push-ups + 200 squats, broken into sets", domain: "physical", baseSeconds: 25 * 60 },
+  { id: "p6", label: "50 min uninterrupted skill-building block, no phone", domain: "mental", baseSeconds: 50 * 60 },
+];
+const ESCALATION_THRESHOLD = 3; // consecutive misses before tier escalates
+const ESCALATION_MULTIPLIER = 1.75;
+
+// ---- Urgent Quest triggers ----
+// Neglect: consecutive level-up checkpoints where a domain received NO stat point at all
+// (manual spend or auto Urgent Quest resolution) — "this domain isn't growing."
+const NEGLECT_THRESHOLDS = { mild: 3, moderate: 5, severe: 8 };
+// Stagnation: Main Quest completions are imbalanced across domains — this domain has
+// fallen behind whichever domain has completed the most, within the current window
+// (the window resets for ALL domains the moment a stagnation-sourced quest fires).
+const MAIN_QUEST_IMBALANCE_THRESHOLDS = { mild: 2, moderate: 4, severe: 6 };
+const SEVERITY_RANK = { mild: 1, moderate: 2, severe: 3 };
+
+// ---- Emblems: earned, not bought. Stub thresholds — tune these once real usage data exists. ----
+// metric types: "domainQuestCount" / "domainStat" (both check ANY single domain against
+// threshold), "statTotal" (sum across all domains), "level", "goldEarned", "goldSpent"
+// (won't unlock until the Shop exists to spend gold in), "highTierDrops".
+// Tier ladder every emblem climbs — bronze through diamond, colors distinct at a glance.
+const TIERS = [
+  { key: "bronze", label: "Bronze", color: "#CD7F32" },
+  { key: "silver", label: "Silver", color: "#C0C0C0" },
+  { key: "gold", label: "Gold", color: "#FFD700" },
+  { key: "platinum", label: "Platinum", color: "#A9C6D6" },
+  { key: "diamond", label: "Diamond", color: "#7EE8E6" },
+];
+
+// ---- Main Quest suggestions: curated starting points per domain, not a locked catalog —
+// player can pick one, edit it, or ignore all of them and write something custom. ----
+const MAIN_QUEST_SUGGESTIONS = {
+  financial: [
+    "Pay off a specific debt in full",
+    "Build a 3-month emergency fund",
+    "Increase monthly savings rate by 10%",
+    "Complete a full budget overhaul",
+    "Launch a new income stream",
+  ],
+  physical: [
+    "Run a 5K without stopping",
+    "Hit a new personal record in the gym",
+    "Complete a 30-day fitness challenge",
+    "Reach a target body composition goal",
+    "Finish an endurance event (race, hike, etc.)",
+  ],
+  mental: [
+    "Finish reading 5 books this quarter",
+    "Complete a certification or course",
+    "Learn a new skill from zero to functional",
+    "Write and publish something substantial",
+    "Master a specific technical tool or system",
+  ],
+  relational: [
+    "Plan a meaningful trip with family",
+    "Have the hard conversation you've been avoiding at home",
+    "Establish a weekly family tradition",
+    "Repair a strained family relationship",
+    "Be fully present for a major family milestone",
+  ],
+  social: [
+    "Rebuild a lapsed friendship",
+    "Expand your professional network meaningfully",
+    "Host or organize a gathering",
+    "Find and connect with a mentor",
+    "Repair a strained professional relationship",
+  ],
+  faith: [
+    "Complete a structured Bible/study plan",
+    "Establish a consistent daily prayer practice",
+    "Serve in a ministry or volunteer role",
+    "Deepen understanding through a specific study",
+    "Lead or mentor someone in their faith walk",
+  ],
+};
+
+const ACHIEVEMENTS = [
+  {
+    id: "quests",
+    label: "Iron Discipline",
+    metricLabel: "quests completed in a single domain",
+    metric: "domainQuestCount",
+    thresholds: [10, 25, 50, 100, 200],
+  },
+  {
+    id: "stat",
+    label: "Ascendant",
+    metricLabel: "stat points in a single domain",
+    metric: "domainStat",
+    thresholds: [5, 10, 20, 35, 50],
+  },
+  {
+    id: "stat_total",
+    label: "Well-Rounded",
+    metricLabel: "combined stat points across all domains",
+    metric: "statTotal",
+    thresholds: [25, 50, 100, 200, 400],
+  },
+  {
+    id: "level",
+    label: "Rising",
+    metricLabel: "player level",
+    metric: "level",
+    thresholds: [5, 10, 20, 35, 50],
+  },
+  {
+    id: "gold_earned",
+    label: "Fortune Favored",
+    metricLabel: "lifetime gold earned",
+    metric: "goldEarned",
+    thresholds: [100, 250, 500, 1000, 2500],
+  },
+  {
+    id: "gold_spent",
+    label: "Big Spender",
+    metricLabel: "gold spent in the Shop",
+    metric: "goldSpent",
+    thresholds: [50, 100, 200, 500, 1000],
+  },
+  {
+    id: "high_tier",
+    label: "Fortune's Favorite",
+    metricLabel: "high-tier Mystery Box drops",
+    metric: "highTierDrops",
+    thresholds: [1, 3, 5, 10, 20],
+  },
+];
+const URGENT_TRIGGER_CHANCE = 0.4; // per level-up check, if any domain is eligible
+const URGENT_QUESTS_PER_CYCLE_CAP = 1; // max NEW urgent quests per daily cycle, regardless of how many level-ups happen within it — tune freely
+const URGENT_QUEST_WINDOW_SECONDS = 6 * 60 * 60; // 6 hours — real response window
+const SEVERITY_WEIGHT = { mild: 1, moderate: 2, severe: 4 }; // higher severity = more likely to be the one picked
+
+// Shared countdown formatter — hour-scale durations (Daily/Urgent Quest windows) show as
+// "Xh Ym"; anything under an hour (Penalty challenge minimums) shows as MM:SS.
+function formatCountdown(totalSeconds) {
+  const clamped = Math.max(0, totalSeconds);
+  if (clamped >= 3600) {
+    const h = Math.floor(clamped / 3600);
+    const m = Math.floor((clamped % 3600) / 60);
+    return `${h}h ${m}m`;
+  }
+  const m = Math.floor(clamped / 60);
+  const s = clamped % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+// Returns the timestamp (ms) of the next local midnight strictly after `fromMs`.
+function getNextMidnight(fromMs) {
+  const d = new Date(fromMs);
+  d.setHours(24, 0, 0, 0); // JS correctly rolls this into tomorrow's midnight
+  return d.getTime();
+}
+
+// Stub pools — 3 per domain, one per severity. Real build needs 8–10 per domain, curated.
+const URGENT_POOL = {
+  financial: [
+    { severity: "mild", label: "Log every transaction from the last 48 hours" },
+    { severity: "mild", label: "Review your account balances and note anything unexpected" },
+    { severity: "mild", label: "Cancel one subscription you don't use" },
+    { severity: "moderate", label: "Full account reconciliation across all cards" },
+    { severity: "moderate", label: "Build or update a one-month budget with real numbers" },
+    { severity: "moderate", label: "Call one creditor or provider to negotiate or clarify a charge" },
+    { severity: "severe", label: "Full budget audit — identify what's been ignored and why" },
+    { severity: "severe", label: "Full net worth snapshot — assets, debts, and the gap between them" },
+    { severity: "severe", label: "Write out a real payoff plan for your largest debt, with dates" },
+  ],
+  physical: [
+    { severity: "mild", label: "Extra conditioning session today, no excuses" },
+    { severity: "mild", label: "Log everything you eat today, no exceptions" },
+    { severity: "mild", label: "20 min walk, no phone" },
+    { severity: "moderate", label: "Full workout + meal log for the day" },
+    { severity: "moderate", label: "Hit a specific rep or weight target you've been avoiding" },
+    { severity: "moderate", label: "Prep meals for the next 3 days in one sitting" },
+    { severity: "severe", label: "Reset day: workout, meal prep, sleep tracked start to finish" },
+    { severity: "severe", label: "Full body measurement and photo check-in, no matter how it feels" },
+    { severity: "severe", label: "Book — or attend — the physical you've been putting off" },
+  ],
+  mental: [
+    { severity: "mild", label: "45 min focused study or reading, phone in another room" },
+    { severity: "mild", label: "Write down three things you learned this week" },
+    { severity: "mild", label: "15 min planning session for tomorrow" },
+    { severity: "moderate", label: "Finish one chapter or module you've been putting off" },
+    { severity: "moderate", label: "Teach or explain what you're learning to someone else" },
+    { severity: "moderate", label: "Block a full evening for a project you keep deferring" },
+    { severity: "severe", label: "Full skill audit — what have you actually been avoiding?" },
+    { severity: "severe", label: "Finish something you started and abandoned" },
+    { severity: "severe", label: "Honest review: is this the right skill to be building right now?" },
+  ],
+  relational: [
+    { severity: "mild", label: "Plan something specific with spouse/son this week" },
+    { severity: "mild", label: "Ask spouse/son one real question and actually listen" },
+    { severity: "mild", label: "Handle one small chore without being asked" },
+    { severity: "moderate", label: "Have the conversation you've been putting off at home" },
+    { severity: "moderate", label: "Plan and follow through on one-on-one time with your son" },
+    { severity: "moderate", label: "Address a recurring friction point directly, not passively" },
+    { severity: "severe", label: "Ask directly how they feel about your presence lately" },
+    { severity: "severe", label: "Apologize for something specific, and mean it" },
+    { severity: "severe", label: "Sit down together and name what's actually not working" },
+  ],
+  social: [
+    { severity: "mild", label: "Reach out to one contact you haven't spoken to in weeks" },
+    { severity: "mild", label: "Comment or engage meaningfully on something in your network" },
+    { severity: "mild", label: "Send one message you've been putting off" },
+    { severity: "moderate", label: "Follow up on a dropped professional thread" },
+    { severity: "moderate", label: "Set up a call or meeting with someone in your network" },
+    { severity: "moderate", label: "Introduce two people who should know each other" },
+    { severity: "severe", label: "Audit your network — who's gone quiet, and why haven't you noticed" },
+    { severity: "severe", label: "Reach out to someone you let a relationship lapse with, directly" },
+    { severity: "severe", label: "Ask a mentor or peer for honest feedback on where you stand" },
+  ],
+  faith: [
+    { severity: "mild", label: "Extra chapter today, no rush" },
+    { severity: "mild", label: "5 min of quiet reflection before bed" },
+    { severity: "mild", label: "Write down one thing you're grateful for" },
+    { severity: "moderate", label: "Full hour: study, prayer, reflection combined" },
+    { severity: "moderate", label: "Attend or engage with your faith community this week" },
+    { severity: "moderate", label: "Journal honestly about where you've been drifting" },
+    { severity: "severe", label: "Honest gut-check: why has this been slipping" },
+    { severity: "severe", label: "Full reset: confession, prayer, and a concrete next step" },
+    { severity: "severe", label: "Have the hard conversation about faith you've been avoiding" },
+  ],
+};
+
+// Persistent typewriter: pulls one line at a time off an ever-growing queue, so multiple
+// pushLog calls in the same tick queue up instead of clobbering each other.
+function useTypedLog() {
+  const [history, setHistory] = useState([]);
+  const queueRef = useRef([]);
+  const timerRef = useRef(null);
+
+  const push = useCallback((lines) => {
+    queueRef.current = [...queueRef.current, ...lines];
+    if (!timerRef.current) tick();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function tick() {
+    timerRef.current = setTimeout(() => {
+      if (queueRef.current.length === 0) {
+        timerRef.current = null;
+        return;
+      }
+      const [next, ...rest] = queueRef.current;
+      queueRef.current = rest;
+      setHistory((h) => [...h, next]);
+      tick();
+    }, 550);
+  }
+
+  useEffect(() => () => timerRef.current && clearTimeout(timerRef.current), []);
+
+  const clear = useCallback(() => {
+    queueRef.current = [];
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setHistory([]);
+  }, []);
+
+  return { history, push, clear };
+}
+
+function SystemEngine() {
+  const [loaded, setLoaded] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [resetArmed, setResetArmed] = useState(false);
+  const [activeTab, setActiveTab] = useState("quests");
+  const [simResults, setSimResults] = useState(null);
+  const [debugTriggerResult, setDebugTriggerResult] = useState(null);
+  const [level, setLevel] = useState(1);
+  const [xp, setXp] = useState(0);
+  const xpToNext = level * 100;
+  const [domainStats, setDomainStats] = useState(
+    Object.fromEntries(DOMAINS.map((d) => [d.key, 0]))
+  );
+  const [checked, setChecked] = useState({});
+  const [questComplete, setQuestComplete] = useState(false);
+  // Real-clock model: dailyQuestDeadline is the upcoming midnight timestamp the current
+  // cycle is due by. nowTick is a shared 1s heartbeat everything derives its countdown
+  // display from — no independently-decrementing counters, so nothing can drift out of
+  // sync with real time over a 24h window the way a plain setInterval counter would.
+  const [dailyQuestDeadline, setDailyQuestDeadline] = useState(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [penaltyActive, setPenaltyActive] = useState(false);
+  const [missCount, setMissCount] = useState(0);
+  const [activeChallenge, setActiveChallenge] = useState(null);
+  const [challengeTier, setChallengeTier] = useState(1);
+  const [penaltyDeadline, setPenaltyDeadline] = useState(null);
+  const [activeUrgentQuests, setActiveUrgentQuests] = useState([]);
+  const [urgentTimeLeft, setUrgentTimeLeft] = useState(0);
+  const [urgentPopupView, setUrgentPopupView] = useState("quest"); // "quest" | "inventory"
+  const [urgentQuestsThisCycle, setUrgentQuestsThisCycle] = useState(0);
+  const [inventory, setInventory] = useState({
+    mysteryBoxes: 0,
+    teleportStones: 0,
+    bonusStatPoints: 0,
+    xpBoosters: 0,
+    hvCatalysts: 0,
+    hairstyleChanges: 0,
+    gold: 0,
+  });
+  const [spendBonusDomain, setSpendBonusDomain] = useState(DOMAINS[0].key);
+  const [spendCatalystDomain, setSpendCatalystDomain] = useState(DOMAINS[0].key);
+  const [xpBoostActive, setXpBoostActive] = useState(false);
+  const [domainHV, setDomainHV] = useState(
+    Object.fromEntries(DOMAINS.map((d) => [d.key, 0]))
+  );
+  // Neglect: consecutive level-up checkpoints without a stat point. domainPointsMissedStreak
+  // is the actual streak; domainReceivedPointSinceCycle is the accumulator flag a spend or
+  // Urgent Quest resolution sets true, checked/cleared at each level-up (see processLevelUp).
+  const [domainPointsMissedStreak, setDomainPointsMissedStreak] = useState(
+    Object.fromEntries(DOMAINS.map((d) => [d.key, 0]))
+  );
+  const [domainReceivedPointSinceCycle, setDomainReceivedPointSinceCycle] = useState(
+    Object.fromEntries(DOMAINS.map((d) => [d.key, false]))
+  );
+  // Stagnation: Main Quest completions since the last stagnation reset, per domain. Live
+  // value, not a streak — severity comes from comparing each domain against the current max.
+  const [domainMainQuestsSinceReset, setDomainMainQuestsSinceReset] = useState(
+    Object.fromEntries(DOMAINS.map((d) => [d.key, 0]))
+  );
+  const [domainQuestCount, setDomainQuestCount] = useState(
+    Object.fromEntries(DOMAINS.map((d) => [d.key, 0]))
+  );
+  const [totalCyclesCompleted, setTotalCyclesCompleted] = useState(0); // real endCycle() calls, not level-ups
+  const [goldEarnedTotal, setGoldEarnedTotal] = useState(0);
+  const [goldSpentTotal, setGoldSpentTotal] = useState(0);
+  const [highTierDropCount, setHighTierDropCount] = useState(0);
+  const [unlockedEmblems, setUnlockedEmblems] = useState({});
+  const [levelUpNotification, setLevelUpNotification] = useState(null);
+  const [pendingLevelUps, setPendingLevelUps] = useState([]);
+  const [avatar, setAvatar] = useState({
+    gender: GENDERS[0],
+    skinTone: SKIN_TONES[1],
+    eyeColor: EYE_COLORS[0],
+    hairColor: HAIR_COLORS[0],
+    hairstyle: HAIRSTYLES[2],
+  });
+  const [avatarLocked, setAvatarLocked] = useState(false);
+  const [hairstyleEditUnlocked, setHairstyleEditUnlocked] = useState(false);
+  const [shopOwned, setShopOwned] = useState({ head: [], upper: [], lower: [] });
+  const [shopEquipped, setShopEquipped] = useState({ head: null, upper: null, lower: null });
+  const [accessoryTier, setAccessoryTier] = useState(0); // 0 = none owned, 1-3 = ladder rungs owned
+  const [auraTier, setAuraTier] = useState(0);
+  const [manualQuests, setManualQuests] = useState([]);
+  const [newManualLabel, setNewManualLabel] = useState("");
+  const [newManualDomain, setNewManualDomain] = useState(DOMAINS[0].key);
+  const [mainQuests, setMainQuests] = useState(
+    Object.fromEntries(DOMAINS.map((d) => [d.key, { label: "", complete: false }]))
+  );
+
+  const { history: logHistory, push: pushLog, clear: clearLog } = useTypedLog();
+
+  // Checks every ACHIEVEMENTS entry against current progress whenever a relevant counter
+  // changes, and climbs the tier ladder as far as thresholds allow. unlockedEmblems stores
+  // the highest tier INDEX reached per achievement (-1/absent = none yet). If a big jump in
+  // one update crosses several tiers at once, each crossed tier gets its own log line.
+  useEffect(() => {
+    const statTotal = DOMAINS.reduce((sum, d) => sum + (domainStats[d.key] || 0), 0);
+    const maxDomainQuestCount = Math.max(0, ...DOMAINS.map((d) => domainQuestCount[d.key] || 0));
+    const maxDomainStat = Math.max(0, ...DOMAINS.map((d) => domainStats[d.key] || 0));
+
+    const metricValue = (metric) => {
+      switch (metric) {
+        case "domainQuestCount":
+          return maxDomainQuestCount;
+        case "domainStat":
+          return maxDomainStat;
+        case "statTotal":
+          return statTotal;
+        case "level":
+          return level;
+        case "goldEarned":
+          return goldEarnedTotal;
+        case "goldSpent":
+          return goldSpentTotal;
+        case "highTierDrops":
+          return highTierDropCount;
+        default:
+          return 0;
+      }
+    };
+
+    ACHIEVEMENTS.forEach((a) => {
+      const currentTier = unlockedEmblems[a.id] ?? -1;
+      const value = metricValue(a.metric);
+      let newTier = currentTier;
+      a.thresholds.forEach((threshold, i) => {
+        if (value >= threshold) newTier = i;
+      });
+      if (newTier > currentTier) {
+        for (let i = currentTier + 1; i <= newTier; i++) {
+          pushLog([`[System]: Emblem tier unlocked — ${a.label} [${TIERS[i].label}].`]);
+        }
+        setUnlockedEmblems((prev) => ({ ...prev, [a.id]: newTier }));
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    domainStats,
+    domainQuestCount,
+    level,
+    goldEarnedTotal,
+    goldSpentTotal,
+    highTierDropCount,
+  ]);
+
+
+  // Shared XP grant + level-up handling, used by every quest type. Consumes an active
+  // XP Booster if one is set — doubles this single grant, then the boost is spent.
+  // Ranks domains by hidden value (HV) and distributes up to 3 stat points on level-up:
+  // 3+ eligible domains (HV > 0) -> top 3 get 1 each. 2 eligible -> 2/1. 1 eligible -> all 3.
+  // Tie-break is randomized each call so ties don't always favor the same domain order.
+  function allocateStatPoints(hvMap) {
+    const eligible = DOMAINS.filter((d) => (hvMap[d.key] || 0) > 0);
+    const ranked = [...eligible]
+      .sort(() => Math.random() - 0.5)
+      .sort((a, b) => (hvMap[b.key] || 0) - (hvMap[a.key] || 0));
+
+    const allocation = {};
+    if (ranked.length >= 3) {
+      ranked.slice(0, 3).forEach((d) => (allocation[d.key] = 1));
+    } else if (ranked.length === 2) {
+      allocation[ranked[0].key] = 2;
+      allocation[ranked[1].key] = 1;
+    } else if (ranked.length === 1) {
+      allocation[ranked[0].key] = 3;
+    }
+    return allocation;
+  }
+
+  // Applies ranked stat allocation for every level gained in one jump (usually 1, but a big
+  // XP Booster-doubled grant could cross more than one), accumulates the total gain per
+  // domain across however many levels were crossed, applies it once, and queues the popup.
+  // Applies ranked stat allocation for every level gained in one jump (usually 1, but a big
+  // XP Booster-doubled grant could cross more than one). HV resets to zero after each level
+  // processed — including mid-batch for a multi-level jump — so an early lead in HV can't
+  // keep winning every future ranking forever; each level-up starts the ranking fresh.
+  function processLevelUp(fromLevel, toLevel) {
+    const beforeStats = { ...domainStats };
+    const totalGain = {};
+    let hvSnapshot = { ...domainHV };
+    for (let i = 0; i < toLevel - fromLevel; i++) {
+      const allocation = allocateStatPoints(hvSnapshot);
+      Object.keys(allocation).forEach((key) => {
+        totalGain[key] = (totalGain[key] || 0) + allocation[key];
+      });
+      hvSnapshot = Object.fromEntries(DOMAINS.map((d) => [d.key, 0]));
+    }
+    setDomainStats((prev) => {
+      const next = { ...prev };
+      Object.keys(totalGain).forEach((key) => {
+        next[key] = (next[key] || 0) + totalGain[key];
+      });
+      return next;
+    });
+    setDomainHV(Object.fromEntries(DOMAINS.map((d) => [d.key, 0])));
+
+    const gains = {};
+    DOMAINS.forEach((d) => {
+      if (totalGain[d.key]) {
+        const before = beforeStats[d.key] || 0;
+        gains[d.key] = { before, after: before + totalGain[d.key] };
+      }
+    });
+    setLevelUpNotification({ fromLevel, toLevel, gains });
+    const gainLines = DOMAINS.filter((d) => gains[d.key])
+      .map((d) => `${d.label} ${gains[d.key].before} -> ${gains[d.key].after}`)
+      .join(", ");
+    pushLog([
+      `[System]: Level ${fromLevel} -> ${toLevel}.`,
+      gainLines ? `[System]: ${gainLines}` : "[System]: No eligible domain for stat gain.",
+    ]);
+
+    // Neglect checkpoint: a domain that received a stat point at any point since the last
+    // level-up resets to 0; everything else advances by one checkpoint. Stagnation
+    // (Main Quest imbalance) needs no checkpoint step — it's read live from current state.
+    // Neglect checkpoint: a domain that received a stat point resets to 0; everything else
+    // advances by one checkpoint. "Received a point" means EITHER a manual spend/Urgent
+    // Quest resolve flagged before this level-up (domainReceivedPointSinceCycle) OR the
+    // ranked HV allocation that just ran above in this same level-up (totalGain) — a domain
+    // that just won the allocation clearly isn't neglected, even though nothing had flagged
+    // it yet. Missing this second source was the bug: a domain could visibly grow every
+    // level-up via the ranked split and still show climbing neglect, because only the other
+    // two point sources were ever checked.
+    const nextPointsMissed = { ...domainPointsMissedStreak };
+    DOMAINS.forEach((d) => {
+      const receivedPoint = domainReceivedPointSinceCycle[d.key] || !!totalGain[d.key];
+      nextPointsMissed[d.key] = receivedPoint ? 0 : (nextPointsMissed[d.key] || 0) + 1;
+    });
+    setDomainPointsMissedStreak(nextPointsMissed);
+    setDomainReceivedPointSinceCycle(Object.fromEntries(DOMAINS.map((d) => [d.key, false])));
+
+    // Urgent Quest evaluation runs against the neglect numbers just computed above (not
+    // possibly-stale committed state) and live Main Quest counts for stagnation. Function
+    // declarations are hoisted, so this can reference evaluateUrgentTriggers even though
+    // it's defined later in the file.
+    evaluateUrgentTriggers(nextPointsMissed, domainMainQuestsSinceReset);
+  }
+
+  function grantXp(amount) {
+    const doubled = xpBoostActive;
+    const finalAmount = doubled ? amount * 2 : amount;
+    if (doubled) {
+      setXpBoostActive(false);
+      pushLog([`[System]: XP Booster consumed — doubled to +${finalAmount}.`]);
+    }
+    setXp((prevXp) => {
+      let total = prevXp + finalAmount;
+      let lvl = level;
+      let cap = lvl * 100;
+      while (total >= cap) {
+        total -= cap;
+        lvl += 1;
+        cap = lvl * 100;
+      }
+      if (lvl !== level) {
+        setLevel(lvl);
+        // processLevelUp must NOT run here — this callback executes synchronously inside
+        // whatever handler called grantXp, before that handler's OTHER setState calls
+        // (e.g., flagging a domain as touched/received-a-point) have actually committed.
+        // Queuing it for a useEffect guarantees it only runs after everything from this
+        // action has landed, so it reads fresh state instead of stale pre-action closures.
+        setPendingLevelUps((prev) => [...prev, { fromLevel: level, toLevel: lvl }]);
+      }
+      return total;
+    });
+  }
+
+  // Every HV grant also counts toward leveling — 1 HV = 1 XP, applied through the same
+  // grantXp path (including XP Booster doubling). This is the single place HV is ever
+  // added, so every source (daily tasks, quests, HV Catalyst) stays consistent.
+  function grantHV(domainKey, amount) {
+    setDomainHV((prev) => ({ ...prev, [domainKey]: (prev[domainKey] || 0) + amount }));
+    grantXp(amount);
+  }
+
+  function activateXpBoost() {
+    if (inventory.xpBoosters <= 0 || xpBoostActive) return;
+    setInventory((prev) => ({ ...prev, xpBoosters: prev.xpBoosters - 1 }));
+    setXpBoostActive(true);
+    pushLog(["[System]: XP Booster activated — next XP grant doubled."]);
+  }
+
+  function spendHvCatalyst() {
+    if (inventory.hvCatalysts <= 0) return;
+    const domain = DOMAINS.find((d) => d.key === spendCatalystDomain);
+    setInventory((prev) => ({ ...prev, hvCatalysts: prev.hvCatalysts - 1 }));
+    grantHV(spendCatalystDomain, 2);
+    pushLog([`[System]: HV Catalyst spent — ${domain.label} +2 HV (+2 XP).`]);
+  }
+
+  // Avatar creation is one-and-done — this is the only way to change hairstyle afterward.
+  // Consumes on use, temporarily re-enables just the hairstyle picker; re-locks automatically
+  // the moment a new style is chosen.
+  function useHairstyleChange() {
+    if (inventory.hairstyleChanges <= 0 || hairstyleEditUnlocked) return;
+    setInventory((prev) => ({ ...prev, hairstyleChanges: prev.hairstyleChanges - 1 }));
+    setHairstyleEditUnlocked(true);
+    pushLog(["[System]: Hairstyle Change used — pick a new style."]);
+  }
+
+  // Shop: purely cosmetic. Head/Upper/Lower are buy-once-equip-freely; Accessory/Aura are
+  // sequential ladders (must own tier N-1 before buying tier N). Every purchase here is the
+  // only source of goldSpentTotal, which is what the "Big Spender" emblem tracks.
+  function buyCosmeticItem(slot, catalog, item) {
+    const owned = shopOwned[slot];
+    if (owned.includes(item.id) || inventory.gold < item.cost) return;
+    setInventory((prev) => ({ ...prev, gold: prev.gold - item.cost }));
+    setGoldSpentTotal((prev) => prev + item.cost);
+    setShopOwned((prev) => ({ ...prev, [slot]: [...prev[slot], item.id] }));
+    pushLog([`[System]: Purchased ${item.label} — ${item.cost} Gold.`]);
+  }
+
+  function equipCosmeticItem(slot, itemId) {
+    if (itemId !== null && !shopOwned[slot].includes(itemId)) return;
+    setShopEquipped((prev) => ({ ...prev, [slot]: itemId }));
+  }
+
+  function buyAccessoryTier() {
+    const nextIdx = accessoryTier; // tier N is index N-1; buying rung `accessoryTier + 1`
+    if (nextIdx >= ACCESSORY_TIERS.length) return;
+    const tier = ACCESSORY_TIERS[nextIdx];
+    if (inventory.gold < tier.cost) return;
+    setInventory((prev) => ({ ...prev, gold: prev.gold - tier.cost }));
+    setGoldSpentTotal((prev) => prev + tier.cost);
+    setAccessoryTier(nextIdx + 1);
+    pushLog([`[System]: Purchased ${tier.label} — ${tier.cost} Gold.`]);
+  }
+
+  function buyAuraTier() {
+    const nextIdx = auraTier;
+    if (nextIdx >= AURA_TIERS.length) return;
+    const tier = AURA_TIERS[nextIdx];
+    if (inventory.gold < tier.cost) return;
+    setInventory((prev) => ({ ...prev, gold: prev.gold - tier.cost }));
+    setGoldSpentTotal((prev) => prev + tier.cost);
+    setAuraTier(nextIdx + 1);
+    pushLog([`[System]: Purchased ${tier.label} — ${tier.cost} Gold.`]);
+  }
+
+  // Reusable Shop slot picker — "None" plus each catalog item, showing owned/equipped/
+  // purchasable state. Click an unowned item to buy it, an owned one to equip it.
+  function renderShopSlot(slotKey, catalog, slotLabel) {
+    const owned = shopOwned[slotKey];
+    const equipped = shopEquipped[slotKey];
+    return (
+      <div className="mb-3">
+        <div className="mono text-[10px] text-[#8B94A3] mb-1.5">{slotLabel}</div>
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={() => equipCosmeticItem(slotKey, null)}
+            className={`mono text-[9px] px-2 py-1.5 rounded border transition ${
+              equipped === null
+                ? "border-[#3DDBD9] text-[#3DDBD9]"
+                : "border-[#2A3140] text-[#8B94A3] hover:border-[#3A4150]"
+            }`}
+          >
+            None
+          </button>
+          {catalog.map((item) => {
+            const isOwned = owned.includes(item.id);
+            const isEquipped = equipped === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() =>
+                  isOwned
+                    ? equipCosmeticItem(slotKey, item.id)
+                    : buyCosmeticItem(slotKey, catalog, item)
+                }
+                className={`flex items-center gap-1.5 mono text-[9px] px-2 py-1.5 rounded border transition ${
+                  isEquipped
+                    ? "border-[#3DDBD9]"
+                    : isOwned
+                    ? "border-[#2A3140] hover:border-[#3A4150]"
+                    : "border-dashed border-[#2A3140] opacity-70 hover:opacity-100"
+                }`}
+              >
+                <span
+                  className="w-3 h-3 rounded-full inline-block shrink-0"
+                  style={{ backgroundColor: item.color }}
+                />
+                <span className={isEquipped ? "text-[#3DDBD9]" : "text-[#D6DCE5]"}>
+                  {item.label}
+                </span>
+                {!isOwned && <span className="text-[#F2C94C]">{item.cost}g</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // Reusable tier-ladder picker for Accessories/Aura — same visual language as the Emblem
+  // ladder bars, but purchased with gold instead of earned.
+  function renderShopLadder(label, tiers, currentTier, buyFn) {
+    const nextTier = currentTier < tiers.length ? tiers[currentTier] : null;
+    return (
+      <div className="mb-3">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="mono text-[10px] text-[#8B94A3]">{label}</span>
+          {currentTier > 0 && (
+            <span className="mono text-[10px]" style={{ color: tiers[currentTier - 1].color }}>
+              {tiers[currentTier - 1].label}
+            </span>
+          )}
+        </div>
+        <div className="flex gap-1 mb-1.5">
+          {tiers.map((t, i) => (
+            <div
+              key={i}
+              className="h-1.5 flex-1 rounded-full"
+              style={{ backgroundColor: i < currentTier ? t.color : "#1E2430" }}
+            />
+          ))}
+        </div>
+        {nextTier ? (
+          <button
+            onClick={buyFn}
+            disabled={inventory.gold < nextTier.cost}
+            className="mono text-[10px] px-3 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Buy {nextTier.label} — {nextTier.cost}g
+          </button>
+        ) : (
+          <span className="mono text-[9px] text-[#5A6272]">Max tier owned</span>
+        )}
+      </div>
+    );
+  }
+  function renderInventoryPanel() {
+    return (
+      <>
+      {/* Inventory — mystery box drops */}
+      {(inventory.mysteryBoxes > 0 ||
+        inventory.teleportStones > 0 ||
+        inventory.bonusStatPoints > 0 ||
+        inventory.xpBoosters > 0 ||
+        inventory.hvCatalysts > 0 ||
+        inventory.gold > 0) && (
+        <div className="border border-[#1E2430] bg-[#12151C] rounded-md px-4 py-3 mb-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="mono text-[10px] tracking-widest text-[#8B94A3]">INVENTORY</div>
+            {inventory.gold > 0 && (
+              <span className="mono text-xs text-[#F2C94C]">{inventory.gold} Gold</span>
+            )}
+          </div>
+
+          {inventory.mysteryBoxes > 0 && (
+            <div className="flex items-center justify-between">
+              <span className="mono text-xs text-[#F2A93B]">
+                Mystery Box × {inventory.mysteryBoxes}
+              </span>
+              <button
+                onClick={openMysteryBox}
+                className="mono text-[10px] px-3 py-1 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+              >
+                OPEN
+              </button>
+            </div>
+          )}
+
+          {inventory.teleportStones > 0 && (
+            <div className="flex items-center justify-between">
+              <span className="mono text-xs text-[#3DDBD9]">
+                Teleportation Stone × {inventory.teleportStones}
+              </span>
+              <span className="mono text-[10px] text-[#5A6272]">use during penalty lockout</span>
+            </div>
+          )}
+
+          {inventory.bonusStatPoints > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="mono text-xs text-[#F2A93B] flex-1">
+                Bonus Stat Point × {inventory.bonusStatPoints}
+              </span>
+              <select
+                value={spendBonusDomain}
+                onChange={(e) => setSpendBonusDomain(e.target.value)}
+                className="mono text-[10px] bg-[#0F1218] border border-[#1E2430] rounded px-2 py-1 text-[#D6DCE5] focus:outline-none focus:border-[#3DDBD9]"
+              >
+                {DOMAINS.map((d) => (
+                  <option key={d.key} value={d.key}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={spendBonusStatPoint}
+                className="mono text-[10px] px-3 py-1 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+              >
+                SPEND
+              </button>
+            </div>
+          )}
+
+          {inventory.xpBoosters > 0 && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="mono text-xs text-[#7EE8E6]">
+                XP Booster × {inventory.xpBoosters}
+                {xpBoostActive && (
+                  <span className="text-[#3DDBD9]"> — armed, doubles next XP grant</span>
+                )}
+              </span>
+              <button
+                onClick={activateXpBoost}
+                disabled={xpBoostActive}
+                className="mono text-[10px] px-3 py-1 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5] disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              >
+                ACTIVATE
+              </button>
+            </div>
+          )}
+
+          {inventory.hvCatalysts > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="mono text-xs text-[#A855F7] flex-1">
+                HV Catalyst × {inventory.hvCatalysts}
+              </span>
+              <select
+                value={spendCatalystDomain}
+                onChange={(e) => setSpendCatalystDomain(e.target.value)}
+                className="mono text-[10px] bg-[#0F1218] border border-[#1E2430] rounded px-2 py-1 text-[#D6DCE5] focus:outline-none focus:border-[#3DDBD9]"
+              >
+                {DOMAINS.map((d) => (
+                  <option key={d.key} value={d.key}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={spendHvCatalyst}
+                className="mono text-[10px] px-3 py-1 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+              >
+                SPEND
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      </>
+    );
+  }
+
+
+  // Opens the Daily Quest's Mystery Box. Nothing is the most likely outcome — this is meant
+  // to feel like a real loot roll, not a guaranteed bonus every day.
+  // Weighted loot roll: 30% Teleportation Stone, 20% Bonus Stat Point, 3% Auto Level Up
+  // (extremely rare — instantly grants a level, no XP requirement), 47% nothing.
+  // Weighted loot roll. Gold is the common floor — every roll gives something, nothing
+  // returns empty-handed. Teleportation Stone and Auto Level Up are the two power outliers,
+  // both pushed to the rarest tier since they bypass real mechanics (penalty, XP curve).
+  // Small Gold 36% | Medium Gold 18% | Large Gold 6%
+  // Bonus Point 10% | XP Booster 10% | HV Catalyst 15%
+  // Teleport Stone 3% | Auto Level Up 2%
+  // Small Gold 31% | Medium Gold 18% | Large Gold 6% | Bonus Point 10% | XP Booster 10%
+  // HV Catalyst 15% | Hairstyle Change 5% | Teleport Stone 3% | Auto Level Up 2%
+  // Usable, not auto-opened — this only runs when the player taps Open on a banked box.
+  function openMysteryBox() {
+    if (inventory.mysteryBoxes <= 0) return;
+    setInventory((prev) => ({ ...prev, mysteryBoxes: prev.mysteryBoxes - 1 }));
+    const roll = Math.random() * 100;
+    if (roll < 31) {
+      setInventory((prev) => ({ ...prev, gold: prev.gold + 10 }));
+      setGoldEarnedTotal((prev) => prev + 10);
+      pushLog(["[System]: Mystery Box — 10 Gold."]);
+    } else if (roll < 49) {
+      setInventory((prev) => ({ ...prev, gold: prev.gold + 25 }));
+      setGoldEarnedTotal((prev) => prev + 25);
+      pushLog(["[System]: Mystery Box — 25 Gold."]);
+    } else if (roll < 55) {
+      setInventory((prev) => ({ ...prev, gold: prev.gold + 60 }));
+      setGoldEarnedTotal((prev) => prev + 60);
+      pushLog(["[System]: Mystery Box — 60 Gold."]);
+    } else if (roll < 65) {
+      setInventory((prev) => ({ ...prev, bonusStatPoints: prev.bonusStatPoints + 1 }));
+      pushLog(["[System]: Mystery Box — Bonus Stat Point acquired."]);
+    } else if (roll < 75) {
+      setInventory((prev) => ({ ...prev, xpBoosters: prev.xpBoosters + 1 }));
+      pushLog(["[System]: Mystery Box — XP Booster acquired."]);
+    } else if (roll < 90) {
+      setInventory((prev) => ({ ...prev, hvCatalysts: prev.hvCatalysts + 1 }));
+      pushLog(["[System]: Mystery Box — HV Catalyst acquired."]);
+    } else if (roll < 95) {
+      setInventory((prev) => ({ ...prev, hairstyleChanges: prev.hairstyleChanges + 1 }));
+      pushLog(["[System]: Mystery Box — Hairstyle Change acquired."]);
+    } else if (roll < 98) {
+      setInventory((prev) => ({ ...prev, teleportStones: prev.teleportStones + 1 }));
+      setHighTierDropCount((prev) => prev + 1);
+      pushLog(["[System]: Mystery Box — ??? acquired.", "[System]: Teleportation Stone."]);
+    } else {
+      const newLevel = level + 1;
+      setHighTierDropCount((prev) => prev + 1);
+      pushLog(["[System]: Mystery Box — ??? acquired.", "[System]: Auto Level Up triggered."]);
+      setLevel(newLevel);
+      setPendingLevelUps((prev) => [...prev, { fromLevel: level, toLevel: newLevel }]);
+    }
+  }
+
+  function useTeleportStone() {
+    if (inventory.teleportStones <= 0) return;
+    setInventory((prev) => ({ ...prev, teleportStones: prev.teleportStones - 1 }));
+    setPenaltyActive(false);
+    setActiveChallenge(null);
+    setPenaltyDeadline(null);
+    pushLog([
+      "[System]: Teleportation Stone used.",
+      "[System]: Penalty bypassed. App access restored.",
+    ]);
+  }
+
+  function spendBonusStatPoint() {
+    if (inventory.bonusStatPoints <= 0) return;
+    const domain = DOMAINS.find((d) => d.key === spendBonusDomain);
+    setInventory((prev) => ({ ...prev, bonusStatPoints: prev.bonusStatPoints - 1 }));
+    setDomainStats((prev) => ({ ...prev, [spendBonusDomain]: prev[spendBonusDomain] + 1 }));
+    setDomainReceivedPointSinceCycle((prev) => ({ ...prev, [spendBonusDomain]: true }));
+    pushLog([`[System]: Bonus Stat Point spent — ${domain.label} +1.`]);
+  }
+
+  // Load saved state on mount. Runs once; sets `loaded` when done so the auto-save effect
+  // doesn't fire on default state before a real save has had a chance to load.
+  useEffect(() => {
+    (async () => {
+      let hadSave = false;
+      try {
+        const result = await window.storage.get("system-engine-save", false);
+        if (result && result.value) {
+          const s = JSON.parse(result.value);
+          if (s.level) setLevel(s.level);
+          if (s.xp !== undefined) setXp(s.xp);
+          if (s.domainStats) setDomainStats(s.domainStats);
+          if (s.domainHV) setDomainHV(s.domainHV);
+          if (s.domainPointsMissedStreak) setDomainPointsMissedStreak(s.domainPointsMissedStreak);
+          if (s.domainMainQuestsSinceReset) setDomainMainQuestsSinceReset(s.domainMainQuestsSinceReset);
+          if (s.domainQuestCount) setDomainQuestCount(s.domainQuestCount);
+          if (s.totalCyclesCompleted !== undefined) setTotalCyclesCompleted(s.totalCyclesCompleted);
+          if (s.inventory) setInventory(s.inventory);
+          if (s.xpBoostActive !== undefined) setXpBoostActive(s.xpBoostActive);
+          if (s.unlockedEmblems) setUnlockedEmblems(s.unlockedEmblems);
+          if (s.avatar) setAvatar(s.avatar);
+          if (s.avatarLocked !== undefined) setAvatarLocked(s.avatarLocked);
+          if (s.manualQuests) setManualQuests(s.manualQuests);
+          if (s.mainQuests) setMainQuests(s.mainQuests);
+          if (s.missCount !== undefined) setMissCount(s.missCount);
+          if (s.goldEarnedTotal !== undefined) setGoldEarnedTotal(s.goldEarnedTotal);
+          if (s.goldSpentTotal !== undefined) setGoldSpentTotal(s.goldSpentTotal);
+          if (s.highTierDropCount !== undefined) setHighTierDropCount(s.highTierDropCount);
+          if (s.activeUrgentQuests) setActiveUrgentQuests(s.activeUrgentQuests);
+          if (s.shopOwned) setShopOwned(s.shopOwned);
+          if (s.shopEquipped) setShopEquipped(s.shopEquipped);
+          if (s.accessoryTier !== undefined) setAccessoryTier(s.accessoryTier);
+          if (s.auraTier !== undefined) setAuraTier(s.auraTier);
+          // Real-clock daily cycle state — now persisted so it survives a reload within
+          // the same real day, and so a missed midnight can be caught up on next open.
+          if (s.checked) setChecked(s.checked);
+          if (s.questComplete !== undefined) setQuestComplete(s.questComplete);
+          if (s.dailyQuestDeadline !== undefined) setDailyQuestDeadline(s.dailyQuestDeadline);
+          if (s.penaltyActive !== undefined) setPenaltyActive(s.penaltyActive);
+          if (s.activeChallenge !== undefined) setActiveChallenge(s.activeChallenge);
+          if (s.challengeTier !== undefined) setChallengeTier(s.challengeTier);
+          if (s.penaltyDeadline !== undefined) setPenaltyDeadline(s.penaltyDeadline);
+          hadSave = true;
+        }
+      } catch (e) {
+        // no save yet — fresh start
+      }
+      setLoaded(true);
+      pushLog(
+        hadSave
+          ? ["[System]: Welcome back, Player.", "[System]: Progress restored."]
+          : [
+              "[System]: You have become a Player.",
+              "[System]: Daily Quest has arrived.",
+              "[System]: Failure to comply will result in a penalty.",
+            ]
+      );
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-saves the durable game state as one combined key whenever it changes. Daily Quest
+  // and Penalty state (checked, questComplete, dailyQuestDeadline, penaltyActive, etc.) are
+  // now included too — the real-clock model needs them persisted so a reload mid-day
+  // resumes correctly, and so a missed midnight gets caught up on next open instead of
+  // silently vanishing (see the deadline-crossing effect above).
+  useEffect(() => {
+    if (!loaded) return;
+    const state = {
+      level,
+      xp,
+      domainStats,
+      domainHV,
+      domainPointsMissedStreak,
+      domainMainQuestsSinceReset,
+      domainQuestCount,
+      totalCyclesCompleted,
+      inventory,
+      xpBoostActive,
+      unlockedEmblems,
+      avatar,
+      avatarLocked,
+      manualQuests,
+      mainQuests,
+      missCount,
+      goldEarnedTotal,
+      goldSpentTotal,
+      highTierDropCount,
+      activeUrgentQuests,
+      shopOwned,
+      shopEquipped,
+      accessoryTier,
+      auraTier,
+      checked,
+      questComplete,
+      dailyQuestDeadline,
+      penaltyActive,
+      activeChallenge,
+      challengeTier,
+      penaltyDeadline,
+    };
+    window.storage.set("system-engine-save", JSON.stringify(state), false).catch(() => {});
+  }, [
+    loaded,
+    level,
+    xp,
+    domainStats,
+    domainHV,
+    domainPointsMissedStreak,
+    domainMainQuestsSinceReset,
+    domainQuestCount,
+    totalCyclesCompleted,
+    inventory,
+    xpBoostActive,
+    unlockedEmblems,
+    avatar,
+    avatarLocked,
+    manualQuests,
+    mainQuests,
+    missCount,
+    goldEarnedTotal,
+    goldSpentTotal,
+    highTierDropCount,
+    activeUrgentQuests,
+    shopOwned,
+    shopEquipped,
+    accessoryTier,
+    auraTier,
+    checked,
+    questComplete,
+    dailyQuestDeadline,
+    penaltyActive,
+    activeChallenge,
+    challengeTier,
+    penaltyDeadline,
+  ]);
+
+  // Wipes both the save and all in-memory state back to defaults.
+  async function debugReset() {
+    try {
+      await window.storage.delete("system-engine-save", false);
+    } catch (e) {
+      // nothing saved yet — fine
+    }
+    setLevel(1);
+    setXp(0);
+    setDomainStats(Object.fromEntries(DOMAINS.map((d) => [d.key, 0])));
+    setDomainHV(Object.fromEntries(DOMAINS.map((d) => [d.key, 0])));
+    setDomainPointsMissedStreak(Object.fromEntries(DOMAINS.map((d) => [d.key, 0])));
+    setDomainReceivedPointSinceCycle(Object.fromEntries(DOMAINS.map((d) => [d.key, false])));
+    setDomainMainQuestsSinceReset(Object.fromEntries(DOMAINS.map((d) => [d.key, 0])));
+    setTotalCyclesCompleted(0);
+    setDomainQuestCount(Object.fromEntries(DOMAINS.map((d) => [d.key, 0])));
+    setInventory({
+      mysteryBoxes: 0,
+      teleportStones: 0,
+      bonusStatPoints: 0,
+      xpBoosters: 0,
+      hvCatalysts: 0,
+      hairstyleChanges: 0,
+      gold: 0,
+    });
+    setXpBoostActive(false);
+    setUnlockedEmblems({});
+    setLevelUpNotification(null);
+    setPendingLevelUps([]);
+    setAvatar({
+      gender: GENDERS[0],
+      skinTone: SKIN_TONES[1],
+      eyeColor: EYE_COLORS[0],
+      hairColor: HAIR_COLORS[0],
+      hairstyle: HAIRSTYLES[2],
+    });
+    setAvatarLocked(false);
+    setHairstyleEditUnlocked(false);
+    setManualQuests([]);
+    setMainQuests(Object.fromEntries(DOMAINS.map((d) => [d.key, { label: "", complete: false }])));
+    setMissCount(0);
+    setGoldEarnedTotal(0);
+    setGoldSpentTotal(0);
+    setHighTierDropCount(0);
+    setActiveUrgentQuests([]);
+    setUrgentTimeLeft(0);
+    setUrgentPopupView("quest");
+    setUrgentQuestsThisCycle(0);
+    setShopOwned({ head: [], upper: [], lower: [] });
+    setShopEquipped({ head: null, upper: null, lower: null });
+    setAccessoryTier(0);
+    setAuraTier(0);
+    setChecked({});
+    setQuestComplete(false);
+    setDailyQuestDeadline(null); // init effect will set a fresh next-midnight value
+    setPenaltyActive(false);
+    setActiveChallenge(null);
+    setChallengeTier(1);
+    setPenaltyDeadline(null);
+    setResetArmed(false);
+    setSimResults(null);
+    setDebugTriggerResult(null);
+    clearLog();
+    pushLog(["[System]: Debug reset — all progress wiped."]);
+  }
+
+  // Single shared clock heartbeat — every countdown display and deadline check derives
+  // from this instead of running its own independent decrementing timer.
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Initializes dailyQuestDeadline to the next real midnight the first time it's needed —
+  // either a brand-new save, or a debug reset that cleared it back to null.
+  useEffect(() => {
+    if (loaded && dailyQuestDeadline === null) {
+      setDailyQuestDeadline(getNextMidnight(Date.now()));
+    }
+  }, [loaded, dailyQuestDeadline]);
+
+  // Fires whenever real midnight has passed relative to the current cycle's deadline —
+  // whether that's because the app was open and a tick just crossed it live, or because
+  // the app was closed over midnight and this is the first render after reopening (same
+  // logic handles both: nowTick starts near "now" on mount, so if the loaded deadline is
+  // already in the past, this fires immediately rather than waiting for a fresh tick).
+  // Guarded on penaltyActive so it doesn't double-fire while already locked — see
+  // clearPenalty/useTeleportStone for what happens if ANOTHER day passes while still stuck.
+  useEffect(() => {
+    if (!loaded || penaltyActive || dailyQuestDeadline === null) return;
+    if (nowTick < dailyQuestDeadline) return;
+
+    if (questComplete) {
+      // Completed before the deadline hit — roll cleanly into the next cycle.
+      setChecked({});
+      setQuestComplete(false);
+      setDailyQuestDeadline(getNextMidnight(nowTick));
+    } else {
+      // Deadline passed with the quest incomplete — apply the penalty retroactively,
+      // exactly as if the countdown had hit zero while the app was open.
+      triggerPenalty();
+      setDailyQuestDeadline(getNextMidnight(nowTick));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nowTick, loaded, dailyQuestDeadline, questComplete, penaltyActive]);
+
+  // Drains the pending level-up queue one at a time. This is what actually calls
+  // processLevelUp — deferred to an effect (never called synchronously from grantXp) so it
+  // always reads state AFTER every other setState from the triggering action has committed,
+  // instead of stale pre-action closures.
+  useEffect(() => {
+    if (pendingLevelUps.length === 0) return;
+    const [next, ...rest] = pendingLevelUps;
+    setPendingLevelUps(rest);
+    processLevelUp(next.fromLevel, next.toLevel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingLevelUps]);
+
+  // The first active Urgent Quest is the "focused" one — the modal only ever shows one at
+  // a time, even if multiple domains have quests queued simultaneously.
+  const focusedUrgentQuest = activeUrgentQuests[0] || null;
+  const focusedUrgentQuestIdRef = useRef(null);
+
+  // Single consolidated effect for both "a new quest just became focused, reset the timer"
+  // and "count down the existing timer." These MUST live in one effect, not two — splitting
+  // them caused a real race: the countdown-check effect would read the leftover urgentTimeLeft
+  // from whatever the PREVIOUS quest left it at (often 0, right after a resolve/fail) in the
+  // same pass as the reset effect, immediately failing a quest that had just been created,
+  // before the reset to 45s had actually applied. The ref lets this effect tell "brand new
+  // quest, just reset and stop here" apart from "same quest, keep counting down."
+  useEffect(() => {
+    if (!focusedUrgentQuest) {
+      focusedUrgentQuestIdRef.current = null;
+      return;
+    }
+
+    if (focusedUrgentQuestIdRef.current !== focusedUrgentQuest.id) {
+      focusedUrgentQuestIdRef.current = focusedUrgentQuest.id;
+      setUrgentTimeLeft(URGENT_QUEST_WINDOW_SECONDS);
+      setUrgentPopupView("quest");
+      return; // don't evaluate failure this same pass — nothing to fail yet
+    }
+
+    if (urgentTimeLeft <= 0) {
+      failFocusedUrgentQuest();
+      return;
+    }
+    const t = setTimeout(() => setUrgentTimeLeft((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urgentTimeLeft, focusedUrgentQuest]);
+
+  // Timeout with no reward. Deliberately doesn't reset the domain's neglect/stagnation
+  // clocks or add any extra punishment — the underlying signal that caused it stays exactly
+  // where it was, so it can simply resurface and roll again later.
+  function failFocusedUrgentQuest() {
+    if (!focusedUrgentQuest) return;
+    const quest = focusedUrgentQuest;
+    setActiveUrgentQuests((prev) => prev.filter((q) => q.id !== quest.id));
+    pushLog([`[System]: Urgent Quest failed — ${quest.label}`, "[System]: No reward granted."]);
+  }
+
+  function touchedMapFromChecked() {
+    const map = {};
+    DOMAINS.forEach((d) => {
+      const task = DAILY_TASKS.find((t) => t.domain === d.key);
+      map[d.key] = !!(task && checked[task.id]);
+    });
+    return map;
+  }
+
+  // Runs at the end of every cycle (success or failure). Grows HV for whatever got touched
+  // (daily tasks = 2 HV each), rolls the neglect clock, tracks stat-allocation stagnation,
+  // and evaluates Urgent Quest triggers — only on a full pass does it also rank HV to
+  // allocate the 3 earned stat points across domains.
+  function endCycle({ awardPoints }) {
+    const touched = touchedMapFromChecked();
+
+    // Daily task HV growth now routes through grantHV, so it also counts toward leveling
+    // (1 HV = 1 XP), consistent with every other HV source.
+    DOMAINS.forEach((d) => {
+      if (touched[d.key]) grantHV(d.key, 2);
+    });
+
+    setDomainQuestCount((prev) => {
+      const next = { ...prev };
+      DOMAINS.forEach((d) => {
+        if (touched[d.key]) next[d.key] = (next[d.key] || 0) + 1;
+      });
+      return next;
+    });
+
+    // Ranked HV allocation replaced with 1 manually-allocated point per Daily Quest pass —
+    // banked in inventory, spent on whichever domain the player chooses via the existing
+    // Bonus Stat Point flow.
+    if (awardPoints) {
+      setInventory((prev) => ({ ...prev, bonusStatPoints: prev.bonusStatPoints + 1 }));
+      pushLog(["[System]: +1 Stat Point earned. Allocate it in Inventory."]);
+    }
+
+    // The daily cycle's only remaining job for the Urgent Quest system: refresh the
+    // per-cycle fire cap. Neglect and stagnation are both level-up-driven now — this
+    // cycle boundary doesn't touch either of them.
+    setUrgentQuestsThisCycle(0);
+    setTotalCyclesCompleted((n) => n + 1); // real endCycle() count, for comparing against Level
+
+    setChecked({});
+  }
+
+  // Neglect: consecutive level-up checkpoints without receiving a stat point (the old
+  // domainPointsMissedStreak/domainReceivedPointSinceCycle tracking — repurposed as
+  // neglect's definition now, not a separately-named "stagnation").
+  function severityFromNeglect(streak) {
+    if (streak >= NEGLECT_THRESHOLDS.severe) return "severe";
+    if (streak >= NEGLECT_THRESHOLDS.moderate) return "moderate";
+    if (streak >= NEGLECT_THRESHOLDS.mild) return "mild";
+    return null;
+  }
+
+  // Stagnation: how far this domain's Main Quest completions have fallen behind whichever
+  // domain has completed the most, within the current window (since the last stagnation
+  // reset). counts must include every domain, including this one.
+  function severityFromStagnation(domainKey, counts) {
+    const maxCount = Math.max(0, ...Object.values(counts));
+    const deficit = maxCount - (counts[domainKey] || 0);
+    if (deficit >= MAIN_QUEST_IMBALANCE_THRESHOLDS.severe) return "severe";
+    if (deficit >= MAIN_QUEST_IMBALANCE_THRESHOLDS.moderate) return "moderate";
+    if (deficit >= MAIN_QUEST_IMBALANCE_THRESHOLDS.mild) return "mild";
+    return null;
+  }
+
+  // Caps at 1 new Urgent Quest per cycle, gated on chance rather than firing automatically
+  // the instant a domain crosses threshold. Two independent trigger sources feed the same
+  // pool: neglect (not touched) and stagnation (touched, but keeps losing the point ranking).
+  // Whichever is worse for a domain determines its severity. Eligible domains that don't get
+  // picked stay queued silently for future cycles — no notification for a non-event.
+  // Pure readout of what's currently eligible, straight from real committed game state —
+  // used for the debug panel's live preview and the "run trigger on current state" button.
+  // NOT used by evaluateUrgentTriggers itself: that function is called from processLevelUp
+  // with a freshly-computed neglect map that hasn't been committed to state yet, so it needs
+  // its own pass rather than reading domainPointsMissedStreak directly.
+  function getCurrentEligibleDomains() {
+    return DOMAINS.map((d) => {
+      if (activeUrgentQuests.some((q) => q.domain === d.key)) return null;
+      const neglectSev = severityFromNeglect(domainPointsMissedStreak[d.key] || 0);
+      const stagnationSev = severityFromStagnation(d.key, domainMainQuestsSinceReset);
+      let severity = null;
+      let reason = null;
+      if (neglectSev && SEVERITY_RANK[neglectSev] >= (SEVERITY_RANK[stagnationSev] || 0)) {
+        severity = neglectSev;
+        reason = "neglect";
+      } else if (stagnationSev) {
+        severity = stagnationSev;
+        reason = "stagnation";
+      }
+      return severity ? { domain: d, severity, reason } : null;
+    }).filter(Boolean);
+  }
+
+  // Pure roll: given a list of {domain, severity} eligible entries, returns the picked
+  // one or null. No side effects — this is the exact mechanism both the real trigger path
+  // and the debug simulator use, so simulating it actually tests the real code.
+  function rollUrgentTrigger(eligible) {
+    if (eligible.length === 0) return null;
+    if (Math.random() > URGENT_TRIGGER_CHANCE) return null;
+    const totalWeight = eligible.reduce((sum, e) => sum + SEVERITY_WEIGHT[e.severity], 0);
+    let roll = Math.random() * totalWeight;
+    let picked = eligible[0];
+    for (const e of eligible) {
+      roll -= SEVERITY_WEIGHT[e.severity];
+      if (roll <= 0) {
+        picked = e;
+        break;
+      }
+    }
+    return picked;
+  }
+
+  // Debug: fires rollUrgentTrigger 1000x against a synthetic eligible set (not real game
+  // state) and tallies results. Tests the actual chance-gate + severity-weighting mechanism
+  // in isolation, since waiting on real cycles to see if the odds "feel right" is slow and
+  // easy to misjudge from a handful of pulls.
+  function runUrgentTriggerSimulation(scenarioLabel, eligible) {
+    const iterations = 1000;
+    let firedCount = 0;
+    const pickCounts = {};
+    for (let i = 0; i < iterations; i++) {
+      const picked = rollUrgentTrigger(eligible);
+      if (picked) {
+        firedCount++;
+        pickCounts[picked.domain.key] = (pickCounts[picked.domain.key] || 0) + 1;
+      }
+    }
+    setSimResults({ scenarioLabel, iterations, firedCount, pickCounts, eligible });
+  }
+
+  function evaluateUrgentTriggers(pointsMissedMap, mainQuestCounts) {
+    if (urgentQuestsThisCycle >= URGENT_QUESTS_PER_CYCLE_CAP) return; // cap reached for this cycle
+    setActiveUrgentQuests((prevActive) => {
+      const eligible = DOMAINS.map((d) => {
+        if (prevActive.some((q) => q.domain === d.key)) return null; // already has one active
+        const neglectSev = severityFromNeglect(pointsMissedMap[d.key] || 0);
+        const stagnationSev = severityFromStagnation(d.key, mainQuestCounts);
+        let severity = null;
+        let reason = null;
+        if (neglectSev && SEVERITY_RANK[neglectSev] >= (SEVERITY_RANK[stagnationSev] || 0)) {
+          severity = neglectSev;
+          reason = "neglect";
+        } else if (stagnationSev) {
+          severity = stagnationSev;
+          reason = "stagnation";
+        }
+        return severity ? { domain: d, severity, reason } : null;
+      }).filter(Boolean);
+
+      const picked = rollUrgentTrigger(eligible);
+      if (!picked) return prevActive;
+
+      const pool = URGENT_POOL[picked.domain.key].filter((q) => q.severity === picked.severity);
+      if (pool.length === 0) return prevActive;
+      const chosen = pool[Math.floor(Math.random() * pool.length)];
+      const newQuest = {
+        id: `${picked.domain.key}-${Date.now()}-${Math.random()}`,
+        domain: picked.domain.key,
+        label: chosen.label,
+        severity: picked.severity,
+      };
+
+      // Player-facing log stays mechanics-free — no "neglect"/"stagnation" reveal, same
+      // spirit as HV being a hidden value. The severity badge on the quest card itself
+      // (mild/moderate/severe) is the only difficulty signal the player sees.
+      pushLog([
+        `[System]: Urgent Quest — ${picked.domain.label}.`,
+        `[System]: ${chosen.label}`,
+      ]);
+      setUrgentQuestsThisCycle((n) => n + 1);
+
+      // Stagnation reset rule: firing a quest FOR stagnation wipes the imbalance window for
+      // EVERY domain, not just the picked one — the slate clears once you've been prompted
+      // to address it, rather than immediately flagging whichever domain is next-most-behind.
+      if (picked.reason === "stagnation") {
+        setDomainMainQuestsSinceReset(Object.fromEntries(DOMAINS.map((dm) => [dm.key, 0])));
+      }
+
+      return [...prevActive, newQuest];
+    });
+  }
+
+  // Debug-only wrapper: runs the real trigger logic (same pure helpers, same real
+  // consequences — a fired result really does add a real Urgent Quest and log it) but also
+  // captures the outcome synchronously for display, since evaluateUrgentTriggers itself is
+  // silent on a non-fire by design, which makes it look like nothing happened when testing.
+  function runTriggerOnCurrentState() {
+    const eligible = getCurrentEligibleDomains();
+    const picked = rollUrgentTrigger(eligible);
+
+    if (!picked) {
+      setDebugTriggerResult({
+        eligible,
+        fired: false,
+        reason: eligible.length === 0 ? "No domain eligible." : "Roll failed (40% chance not met).",
+      });
+      return;
+    }
+
+    const pool = URGENT_POOL[picked.domain.key].filter((q) => q.severity === picked.severity);
+    if (pool.length === 0) {
+      setDebugTriggerResult({ eligible, fired: false, reason: "Picked domain had an empty pool." });
+      return;
+    }
+    const chosen = pool[Math.floor(Math.random() * pool.length)];
+    const newQuest = {
+      id: `${picked.domain.key}-${Date.now()}-${Math.random()}`,
+      domain: picked.domain.key,
+      label: chosen.label,
+      severity: picked.severity,
+    };
+    setActiveUrgentQuests((prev) => [...prev, newQuest]);
+    // Shares the exact same player-facing (mechanics-hidden) log text as the real trigger
+    // path — this button applies real consequences, so the log it produces should read
+    // identically to what a real level-up trigger would write. Full detail (reason,
+    // severity) still shows in debugTriggerResult below, in the Debug tab only.
+    pushLog([
+      `[System]: Urgent Quest — ${picked.domain.label}.`,
+      `[System]: ${chosen.label}`,
+    ]);
+    if (picked.reason === "stagnation") {
+      setDomainMainQuestsSinceReset(Object.fromEntries(DOMAINS.map((dm) => [dm.key, 0])));
+    }
+    setDebugTriggerResult({ eligible, fired: true, picked, questLabel: chosen.label });
+  }
+
+  function resolveUrgentQuest(quest) {
+    setActiveUrgentQuests((prev) => prev.filter((q) => q.id !== quest.id));
+    setDomainQuestCount((prev) => ({ ...prev, [quest.domain]: (prev[quest.domain] || 0) + 1 }));
+    setDomainStats((prev) => ({ ...prev, [quest.domain]: prev[quest.domain] + 1 }));
+    setDomainReceivedPointSinceCycle((prev) => ({ ...prev, [quest.domain]: true })); // auto stat point
+    grantXp(15);
+    grantHV(quest.domain, 1); // +1 more XP on top of the 15, since HV now always carries XP
+    pushLog([
+      `[System]: Urgent Quest resolved — ${quest.label}`,
+      "[System]: +15 XP, +1 stat point.",
+    ]);
+  }
+
+  // Manual quests: player-authored, ad hoc ("go to the gym today"). Gives XP and HV, but no
+  // direct stat bump — same as Main Quests, HV only influences future daily point allocation.
+  // Completing one still counts as touching that domain today.
+  function addManualQuest() {
+    const label = newManualLabel.trim();
+    if (!label) return;
+    setManualQuests((prev) => [
+      ...prev,
+      { id: `manual-${Date.now()}-${Math.random()}`, label, domain: newManualDomain },
+    ]);
+    setNewManualLabel("");
+  }
+
+  function completeManualQuest(quest) {
+    setManualQuests((prev) => prev.filter((q) => q.id !== quest.id));
+    setDomainQuestCount((prev) => ({ ...prev, [quest.domain]: (prev[quest.domain] || 0) + 1 }));
+    grantXp(10);
+    grantHV(quest.domain, 1); // +1 more XP on top of the 10
+    pushLog([`[System]: Manual Quest complete — ${quest.label}`, "[System]: +10 XP, +1 HV."]);
+  }
+
+  // Main quests: one per domain, mandatory-feeling milestone objective, player-authored.
+  // +3 HV plus a bigger XP reward on completion, matching the weight of a real milestone.
+  function updateMainQuestLabel(domainKey, text) {
+    setMainQuests((prev) => ({ ...prev, [domainKey]: { ...prev[domainKey], label: text } }));
+  }
+
+  function completeMainQuest(domainKey) {
+    const quest = mainQuests[domainKey];
+    if (!quest.label.trim() || quest.complete) return;
+    setMainQuests((prev) => ({ ...prev, [domainKey]: { ...prev[domainKey], complete: true } }));
+    setDomainQuestCount((prev) => ({ ...prev, [domainKey]: (prev[domainKey] || 0) + 1 }));
+    setDomainMainQuestsSinceReset((prev) => ({ ...prev, [domainKey]: (prev[domainKey] || 0) + 1 }));
+    grantXp(60);
+    grantHV(domainKey, 3); // +3 more XP on top of the 60
+    pushLog([
+      `[System]: Main Quest complete — ${quest.label}`,
+      "[System]: +60 XP, +3 HV.",
+    ]);
+  }
+
+  function resetMainQuest(domainKey) {
+    setMainQuests((prev) => ({ ...prev, [domainKey]: { label: "", complete: false } }));
+  }
+
+  function setAvatarField(field, value) {
+    setAvatar((prev) => ({ ...prev, [field]: value }));
+    if (field === "hairstyle" && hairstyleEditUnlocked) {
+      setHairstyleEditUnlocked(false);
+      pushLog([`[System]: Hairstyle updated — ${value}.`]);
+    }
+  }
+
+  function confirmAvatar() {
+    setAvatarLocked(true);
+    pushLog(["[System]: Avatar locked in.", "[System]: Use a Hairstyle Change to alter it later."]);
+  }
+
+  // Renders the hair silhouette on top of the base head shape. Kept as simple stacked
+  // ellipses/rects rather than precise anatomical paths — this is a stylized placeholder,
+  // not final art, since there's no way to visually preview SVG alignment from code alone.
+  // Splits the body silhouette into upper (chest/shoulders) and lower (waist down) regions
+  // so Shop's Upper/Lower slots can recolor them independently. Per-gender coordinates are
+  // hand-picked to roughly match the original single-piece torso shape, split at the waist.
+  function getAvatarBodyPaths(gender) {
+    if (gender === "Female") {
+      return {
+        upper: "M 72 165 L 128 165 L 125 195 L 75 195 Z",
+        lower: "M 75 195 L 125 195 L 122 225 L 78 225 Z",
+      };
+    }
+    if (gender === "Non-binary") {
+      return {
+        upper: "M 67 165 L 133 165 L 129 195 L 71 195 Z",
+        lower: "M 71 195 L 129 195 L 125 225 L 75 225 Z",
+      };
+    }
+    return {
+      upper: "M 62 165 L 138 165 L 133 195 L 67 195 Z",
+      lower: "M 67 195 L 133 195 L 128 225 L 72 225 Z",
+    };
+  }
+
+  function renderAvatarHair(hairstyle, hairColor) {
+    if (hairstyle === "Bald") return null;
+    const cap =
+      hairstyle === "Buzzcut" ? (
+        <ellipse cx="100" cy="72" rx="42" ry="16" fill={hairColor} />
+      ) : (
+        <ellipse cx="100" cy="70" rx="42" ry="24" fill={hairColor} />
+      );
+    if (hairstyle === "Buzzcut") return cap;
+    if (hairstyle === "Short") {
+      return (
+        <>
+          {cap}
+          <rect x="58" y="70" width="10" height="20" rx="4" fill={hairColor} />
+          <rect x="132" y="70" width="10" height="20" rx="4" fill={hairColor} />
+        </>
+      );
+    }
+    if (hairstyle === "Medium") {
+      return (
+        <>
+          {cap}
+          <rect x="58" y="70" width="10" height="40" rx="4" fill={hairColor} />
+          <rect x="132" y="70" width="10" height="40" rx="4" fill={hairColor} />
+        </>
+      );
+    }
+    if (hairstyle === "Long") {
+      return (
+        <>
+          {cap}
+          <rect x="56" y="70" width="12" height="90" rx="5" fill={hairColor} />
+          <rect x="132" y="70" width="12" height="90" rx="5" fill={hairColor} />
+        </>
+      );
+    }
+    if (hairstyle === "Ponytail") {
+      return (
+        <>
+          {cap}
+          <rect x="58" y="70" width="10" height="20" rx="4" fill={hairColor} />
+          <rect x="132" y="70" width="10" height="20" rx="4" fill={hairColor} />
+          <path d="M 136 75 Q 170 100 150 170 Q 165 110 130 80 Z" fill={hairColor} />
+        </>
+      );
+    }
+    return cap;
+  }
+
+  function triggerPenalty() {
+    endCycle({ awardPoints: false }); // cycle ends in failure — HV/neglect still update, no points awarded
+
+    const nextMissCount = missCount + 1;
+    const tier = nextMissCount >= ESCALATION_THRESHOLD ? 2 : 1;
+    const challenge = PENALTY_POOL[Math.floor(Math.random() * PENALTY_POOL.length)];
+    const duration = Math.round(
+      challenge.baseSeconds * (tier === 2 ? ESCALATION_MULTIPLIER : 1)
+    );
+
+    setMissCount(nextMissCount);
+    setActiveChallenge(challenge);
+    setChallengeTier(tier);
+    setPenaltyDeadline(Date.now() + duration * 1000);
+    setPenaltyActive(true);
+
+    pushLog([
+      "[System]: Daily Quest failed.",
+      `[System]: App locked. Penalty assigned: ${challenge.label}.`,
+      tier === 2
+        ? `[System]: Escalation Tier 2 — ${nextMissCount} consecutive misses.`
+        : "[System]: Complete the challenge to restore access.",
+    ]);
+  }
+
+  function clearPenalty() {
+    if (!canClearPenalty) return;
+    pushLog([
+      "[System]: Challenge verified complete.",
+      "[System]: App access restored.",
+      "[System]: Daily Quest reset.",
+    ]);
+    setPenaltyActive(false);
+    setActiveChallenge(null);
+    setPenaltyDeadline(null);
+  }
+
+  function toggleTask(task) {
+    if (questComplete || penaltyActive) return;
+    setChecked((prev) => ({ ...prev, [task.id]: !prev[task.id] }));
+  }
+
+  useEffect(() => {
+    const allDone = DAILY_TASKS.every((t) => checked[t.id]);
+    if (allDone && !questComplete) {
+      completeQuest();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checked]);
+
+  function completeQuest() {
+    setQuestComplete(true);
+    const gainedXp = 40;
+
+    pushLog(["[System]: Daily Quest complete.", `[System]: +${gainedXp} XP.`, "[System]: +1 Mystery Box."]);
+    grantXp(gainedXp);
+    setMissCount(0);
+    endCycle({ awardPoints: true }); // full pass — HV grows for all 6, +1 manual stat point banked
+    setInventory((prev) => ({ ...prev, mysteryBoxes: prev.mysteryBoxes + 1 }));
+  }
+
+  const combinedLog = logHistory;
+  const questProgress = DAILY_TASKS.filter((t) => checked[t.id]).length;
+
+  // Derived, never independently stored — always exactly correct relative to real time,
+  // since they're computed fresh from timestamps rather than decremented by a timer.
+  const dailyTimeLeft =
+    dailyQuestDeadline !== null ? Math.max(0, Math.round((dailyQuestDeadline - nowTick) / 1000)) : 0;
+  const penaltyTimeLeftDerived =
+    penaltyDeadline !== null ? Math.max(0, Math.round((penaltyDeadline - nowTick) / 1000)) : 0;
+  const canClearPenalty = penaltyDeadline !== null && nowTick >= penaltyDeadline;
+
+  if (!loaded) {
+    return (
+      <div
+        className="w-full min-h-[600px] font-sans p-4 sm:p-6 rounded-lg flex items-center justify-center"
+        style={{ backgroundColor: "#0B0D12", color: "#D6DCE5" }}
+      >
+        <style>{`.mono { font-family: "JetBrains Mono", ui-monospace, monospace; }`}</style>
+        <div className="mono text-xs" style={{ color: "#8B94A3" }}>
+          [System]: Loading save data...
+        </div>
+      </div>
+    );
+  }
+
+  // Full app lockout — this replaces the entire interface, no nav, no bypass,
+  // until the assigned challenge's minimum duration has elapsed and it's marked complete.
+  if (penaltyActive) {
+    const domainMeta = activeChallenge && DOMAINS.find((d) => d.key === activeChallenge.domain);
+    return (
+      <div
+        className="w-full min-h-[600px] font-sans p-4 sm:p-6 rounded-lg flex flex-col items-center justify-center text-center relative"
+        style={{ backgroundColor: "#0B0D12", color: "#D6DCE5" }}
+      >
+        <style>{`.mono { font-family: "JetBrains Mono", ui-monospace, monospace; }`}</style>
+
+        <button
+          onClick={() => setShowDebug((s) => !s)}
+          className="mono text-[9px] px-2 py-1 rounded transition absolute top-4 right-4"
+          style={{ border: "1px solid #1E2430", color: "#5A6272" }}
+        >
+          DEBUG
+        </button>
+        {showDebug && (
+          <div
+            className="absolute top-12 right-4 rounded-md px-3 py-2 z-10"
+            style={{ border: "1px solid #2A2010", backgroundColor: "#161206" }}
+          >
+            {!resetArmed ? (
+              <button
+                onClick={() => setResetArmed(true)}
+                className="mono text-[10px] px-3 py-1.5 rounded transition whitespace-nowrap"
+                style={{ border: "1px solid #E5484D", color: "#E5484D" }}
+              >
+                RESET ALL PROGRESS
+              </button>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                <span className="mono text-[9px] whitespace-nowrap" style={{ color: "#E5484D" }}>
+                  Wipes save + all state. Confirm?
+                </span>
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={debugReset}
+                    className="mono text-[10px] px-2 py-1 rounded"
+                    style={{ border: "1px solid #E5484D", backgroundColor: "#E5484D", color: "#0B0D12" }}
+                  >
+                    YES
+                  </button>
+                  <button
+                    onClick={() => setResetArmed(false)}
+                    className="mono text-[10px] px-2 py-1 rounded"
+                    style={{ border: "1px solid #2A3140", color: "#D6DCE5" }}
+                  >
+                    CANCEL
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <ShieldAlert size={36} color="#E5484D" />
+        <div className="mono text-[#E5484D] text-sm tracking-widest mt-4">
+          APP LOCKED{challengeTier === 2 ? " — ESCALATION TIER 2" : ""}
+        </div>
+        <div className="mono text-[10px] text-[#8B94A3] mt-1">
+          {missCount} consecutive miss{missCount !== 1 ? "es" : ""}
+        </div>
+
+        <div className="mt-6 border border-[#2A1518] bg-[#160D0F] rounded-md px-6 py-5 max-w-sm w-full">
+          <div className="flex items-center justify-center gap-2 mb-2">
+            <Lock size={14} color={domainMeta?.color || "#E5484D"} />
+            <span
+              className="mono text-[10px] tracking-widest"
+              style={{ color: domainMeta?.color || "#E5484D" }}
+            >
+              {domainMeta?.label}
+            </span>
+          </div>
+          <div className="text-[#EDEFF3] text-sm">{activeChallenge?.label}</div>
+        </div>
+
+        <div className="mt-6 mono text-xs text-[#8B94A3]">
+          {canClearPenalty
+            ? "Minimum duration met."
+            : `Locked for ${formatCountdown(penaltyTimeLeftDerived)} minimum`}
+        </div>
+        {!canClearPenalty && (
+          <div className="w-full max-w-xs h-1.5 bg-[#1E2430] rounded-full overflow-hidden mt-3">
+            <div
+              className="h-full bg-[#E5484D] transition-all duration-1000"
+              style={{
+                width: `${
+                  activeChallenge
+                    ? ((Math.round(
+                        activeChallenge.baseSeconds *
+                          (challengeTier === 2 ? ESCALATION_MULTIPLIER : 1)
+                      ) -
+                        penaltyTimeLeftDerived) /
+                        Math.round(
+                          activeChallenge.baseSeconds *
+                            (challengeTier === 2 ? ESCALATION_MULTIPLIER : 1)
+                        )) *
+                      100
+                    : 0
+                }%`,
+              }}
+            />
+          </div>
+        )}
+
+        <button
+          onClick={clearPenalty}
+          disabled={!canClearPenalty}
+          className="mono text-xs mt-6 px-5 py-2.5 rounded border border-[#2A3140] bg-[#12151C] text-[#D6DCE5] disabled:opacity-40 disabled:cursor-not-allowed hover:border-[#3DDBD9] transition"
+        >
+          MARK CHALLENGE COMPLETE
+        </button>
+
+        {inventory.teleportStones > 0 && (
+          <button
+            onClick={useTeleportStone}
+            className="mono text-xs mt-3 px-5 py-2.5 rounded border border-[#3DDBD9] bg-[#0F1218] text-[#3DDBD9] hover:bg-[#12151C] transition"
+          >
+            USE TELEPORTATION STONE ({inventory.teleportStones}) — SKIP PENALTY
+          </button>
+        )}
+
+        <div className="mono text-[9px] text-[#5A6272] mt-3 max-w-xs">
+          Prototype note: self-reported. Real build needs an honest completion
+          signal — a linked workout log, timer app, or similar — or this button
+          defeats the whole mechanic.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="w-full min-h-[600px] font-sans p-4 sm:p-6 rounded-lg"
+      style={{ backgroundColor: "#0B0D12", color: "#D6DCE5" }}
+    >
+      <style>{`
+        .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+      `}</style>
+
+      {/* Level Up popup — overlays the current view, dismissible, doesn't lock anything */}
+      {levelUpNotification && (
+        <div
+          className="fixed inset-0 flex items-center justify-center z-50 p-4"
+          style={{ backgroundColor: "rgba(0,0,0,0.7)" }}
+        >
+          <div
+            className="rounded-md px-6 py-5 max-w-xs w-full text-center"
+            style={{ border: "1px solid #3DDBD9", backgroundColor: "#12151C" }}
+          >
+            <Zap size={28} color="#3DDBD9" className="mx-auto mb-2" />
+            <div className="mono text-xs tracking-widest mb-3" style={{ color: "#3DDBD9" }}>
+              LEVEL UP
+            </div>
+            <div className="mono text-lg mb-4" style={{ color: "#EDEFF3" }}>
+              Level: {levelUpNotification.fromLevel} → {levelUpNotification.toLevel}
+            </div>
+            <div className="space-y-1 mb-5">
+              {DOMAINS.filter((d) => levelUpNotification.gains[d.key]).map((d) => (
+                <div key={d.key} className="flex items-center justify-between mono text-xs">
+                  <span style={{ color: d.color }}>{d.label}</span>
+                  <span style={{ color: "#D6DCE5" }}>
+                    {levelUpNotification.gains[d.key].before} → {levelUpNotification.gains[d.key].after}
+                  </span>
+                </div>
+              ))}
+              {Object.keys(levelUpNotification.gains).length === 0 && (
+                <div className="mono text-xs" style={{ color: "#5A6272" }}>
+                  No eligible domain for stat gain.
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => setLevelUpNotification(null)}
+              className="mono text-xs px-5 py-2 rounded transition"
+              style={{ border: "1px solid #3DDBD9", color: "#3DDBD9" }}
+            >
+              CONTINUE
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Urgent Quest semi-lock — a modal overlay, not a full app-replace like the Penalty
+          Zone. Everything else stays visible underneath but non-interactive. Only the
+          focused quest and Inventory (toggled via urgentPopupView) are reachable. Persists
+          until the quest completes, fails (timer runs out), or a debug reset clears it. */}
+      {focusedUrgentQuest && (() => {
+        const domain = DOMAINS.find((d) => d.key === focusedUrgentQuest.domain);
+        const severityColor =
+          focusedUrgentQuest.severity === "severe"
+            ? "#E5484D"
+            : focusedUrgentQuest.severity === "moderate"
+            ? "#F2A93B"
+            : "#D6DCE5";
+        return (
+          <div
+            className="fixed inset-0 flex items-center justify-center z-40 p-4"
+            style={{ backgroundColor: "rgba(0,0,0,0.8)" }}
+          >
+            <div
+              className="rounded-md px-6 py-5 max-w-sm w-full relative"
+              style={{ border: "1px solid #F2A93B", backgroundColor: "#12151C" }}
+            >
+              <button
+                onClick={() => setShowDebug((s) => !s)}
+                className="mono text-[9px] px-2 py-1 rounded transition absolute top-4 right-4"
+                style={{ border: "1px solid #1E2430", color: "#5A6272" }}
+              >
+                DEBUG
+              </button>
+              {showDebug && (
+                <div
+                  className="absolute top-12 right-4 rounded-md px-3 py-2 z-10"
+                  style={{ border: "1px solid #2A2010", backgroundColor: "#161206" }}
+                >
+                  {!resetArmed ? (
+                    <button
+                      onClick={() => setResetArmed(true)}
+                      className="mono text-[10px] px-3 py-1.5 rounded transition whitespace-nowrap"
+                      style={{ border: "1px solid #E5484D", color: "#E5484D" }}
+                    >
+                      RESET ALL PROGRESS
+                    </button>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      <span className="mono text-[9px] whitespace-nowrap" style={{ color: "#E5484D" }}>
+                        Wipes save + all state. Confirm?
+                      </span>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={debugReset}
+                          className="mono text-[10px] px-2 py-1 rounded"
+                          style={{
+                            border: "1px solid #E5484D",
+                            backgroundColor: "#E5484D",
+                            color: "#0B0D12",
+                          }}
+                        >
+                          YES
+                        </button>
+                        <button
+                          onClick={() => setResetArmed(false)}
+                          className="mono text-[10px] px-2 py-1 rounded"
+                          style={{ border: "1px solid #2A3140", color: "#D6DCE5" }}
+                        >
+                          CANCEL
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {urgentPopupView === "quest" ? (
+                <>
+                  <div className="flex items-center gap-2 mb-3">
+                    <ShieldAlert size={20} color="#F2A93B" />
+                    <span className="mono text-xs tracking-widest" style={{ color: "#F2A93B" }}>
+                      URGENT QUEST{activeUrgentQuests.length > 1 ? ` (1 of ${activeUrgentQuests.length})` : ""}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 mb-2">
+                    <span
+                      className="mono text-[9px] tracking-widest px-1.5 py-0.5 rounded"
+                      style={{ color: severityColor, border: `1px solid ${severityColor}` }}
+                    >
+                      {focusedUrgentQuest.severity.toUpperCase()}
+                    </span>
+                    <span className="mono text-[10px] tracking-wide" style={{ color: domain.color }}>
+                      {domain.label}
+                    </span>
+                  </div>
+
+                  <div className="text-sm mb-4" style={{ color: "#EDEFF3" }}>
+                    {focusedUrgentQuest.label}
+                  </div>
+
+                  <div className="mono text-xs mb-4" style={{ color: "#F2A93B" }}>
+                    {formatCountdown(urgentTimeLeft)} remaining
+                  </div>
+
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={() => resolveUrgentQuest(focusedUrgentQuest)}
+                      className="mono text-xs px-4 py-2 rounded transition"
+                      style={{ border: "1px solid #3DDBD9", color: "#3DDBD9" }}
+                    >
+                      RESOLVE
+                    </button>
+                    <button
+                      onClick={() => setUrgentPopupView("inventory")}
+                      className="mono text-xs px-4 py-2 rounded transition"
+                      style={{ border: "1px solid #2A3140", color: "#D6DCE5" }}
+                    >
+                      INVENTORY
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="mono text-xs tracking-widest" style={{ color: "#8B94A3" }}>
+                      INVENTORY
+                    </span>
+                    <button
+                      onClick={() => setUrgentPopupView("quest")}
+                      className="mono text-[10px] px-3 py-1.5 rounded transition"
+                      style={{ border: "1px solid #2A3140", color: "#D6DCE5" }}
+                    >
+                      BACK
+                    </button>
+                  </div>
+                  {renderInventoryPanel()}
+                  {inventory.mysteryBoxes === 0 &&
+                    inventory.teleportStones === 0 &&
+                    inventory.bonusStatPoints === 0 &&
+                    inventory.xpBoosters === 0 &&
+                    inventory.hvCatalysts === 0 &&
+                    inventory.gold === 0 && (
+                      <div className="mono text-[10px]" style={{ color: "#5A6272" }}>
+                        Inventory is empty.
+                      </div>
+                    )}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Status bar */}
+      <div className="flex items-center justify-between border border-[#1E2430] bg-[#12151C] rounded-md px-4 py-3 mb-4">
+        <div className="flex items-center gap-3">
+          <Zap size={18} color="#3DDBD9" />
+          <div>
+            <div className="mono text-xs text-[#8B94A3] tracking-widest">PLAYER</div>
+            <div className="mono text-sm text-[#EDEFF3]">Don · Level {level}</div>
+          </div>
+        </div>
+        <div className="flex-1 mx-6 hidden sm:block">
+          <div className="mono text-[10px] text-[#8B94A3] mb-1">
+            XP {xp} / {xpToNext}
+          </div>
+          <div className="h-1.5 bg-[#1E2430] rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[#3DDBD9] transition-all duration-500"
+              style={{ width: `${Math.min(100, (xp / xpToNext) * 100)}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Tab navigation */}
+      <div className="flex gap-1 mb-4 border border-[#1E2430] bg-[#12151C] rounded-md p-1">
+        {[
+          { key: "character", label: "CHARACTER" },
+          { key: "quests", label: "QUESTS" },
+          { key: "shop", label: "SHOP" },
+          { key: "debug", label: "DEBUG" },
+        ].map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setActiveTab(t.key)}
+            className={`flex-1 mono text-[10px] tracking-widest px-2 py-2 rounded transition ${
+              activeTab === t.key
+                ? "bg-[#0F1218] text-[#3DDBD9] border border-[#3DDBD9]"
+                : "text-[#8B94A3] border border-transparent hover:text-[#D6DCE5]"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "character" && (
+        <>
+      {/* System Log — moved here since it carries info from every part of the app
+          (quests, mystery box, emblems, level-ups, shop purchases), not just quests. */}
+      <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4 mb-4">
+        <div className="mono text-xs tracking-widest text-[#8B94A3] mb-3">SYSTEM LOG</div>
+        <div className="space-y-1.5 overflow-y-auto max-h-64">
+          {combinedLog.map((line, i) => (
+            <div key={i} className="mono text-xs text-[#7EE8E6] leading-relaxed">
+              {line}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Avatar — base identity, separate from Shop cosmetics which layer on top later.
+          One-and-done: locks after confirmation. Only a Hairstyle Change item reopens
+          the hairstyle picker afterward. */}
+      <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="mono text-xs tracking-widest text-[#8B94A3]">AVATAR</div>
+          {avatarLocked && (
+            <span className="mono text-[9px] text-[#5A6272]">LOCKED</span>
+          )}
+        </div>
+        <div className="flex flex-col sm:flex-row gap-4">
+          <div className="flex justify-center sm:justify-start shrink-0">
+            <svg viewBox="0 0 200 240" className="w-32 h-40">
+              {auraTier > 0 && (
+                <circle
+                  cx="100"
+                  cy="120"
+                  r="70"
+                  fill="none"
+                  stroke={AURA_TIERS[auraTier - 1].color}
+                  strokeWidth={2 + auraTier}
+                  opacity="0.5"
+                />
+              )}
+              <path
+                d={getAvatarBodyPaths(avatar.gender).upper}
+                fill={
+                  shopEquipped.upper
+                    ? UPPER_CATALOG.find((i) => i.id === shopEquipped.upper)?.color
+                    : "#2A3140"
+                }
+              />
+              <path
+                d={getAvatarBodyPaths(avatar.gender).lower}
+                fill={
+                  shopEquipped.lower
+                    ? LOWER_CATALOG.find((i) => i.id === shopEquipped.lower)?.color
+                    : "#2A3140"
+                }
+              />
+              <rect x="90" y="126" width="20" height="20" fill={avatar.skinTone} />
+              <circle cx="100" cy="95" r="38" fill={avatar.skinTone} />
+              <circle cx="85" cy="92" r="4" fill={avatar.eyeColor} />
+              <circle cx="115" cy="92" r="4" fill={avatar.eyeColor} />
+              {shopEquipped.head ? (
+                // Headgear overwrites hairstyle entirely — a helmet covers the hair, it
+                // doesn't sit as an accent on top of it.
+                <ellipse
+                  cx="100"
+                  cy="70"
+                  rx="46"
+                  ry="28"
+                  fill={HEAD_CATALOG.find((i) => i.id === shopEquipped.head)?.color}
+                />
+              ) : (
+                renderAvatarHair(avatar.hairstyle, avatar.hairColor)
+              )}
+              {accessoryTier > 0 && (
+                <circle cx="140" cy="160" r={3 + accessoryTier * 2} fill={ACCESSORY_TIERS[accessoryTier - 1].color} />
+              )}
+            </svg>
+          </div>
+
+          <div className="flex-1 space-y-3">
+            <div className={avatarLocked ? "opacity-40 pointer-events-none" : ""}>
+              <div className="mono text-[10px] text-[#8B94A3] mb-1.5">GENDER</div>
+              <div className="flex gap-2 flex-wrap">
+                {GENDERS.map((g) => (
+                  <button
+                    key={g}
+                    onClick={() => setAvatarField("gender", g)}
+                    className={`mono text-[10px] px-3 py-1.5 rounded border transition ${
+                      avatar.gender === g
+                        ? "border-[#3DDBD9] text-[#3DDBD9]"
+                        : "border-[#2A3140] text-[#8B94A3] hover:border-[#3A4150]"
+                    }`}
+                  >
+                    {g}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div
+              className={
+                avatarLocked && !hairstyleEditUnlocked ? "opacity-40 pointer-events-none" : ""
+              }
+            >
+              <div className="mono text-[10px] text-[#8B94A3] mb-1.5">
+                HAIRSTYLE
+                {avatarLocked && hairstyleEditUnlocked && (
+                  <span className="text-[#3DDBD9]"> — pick your new style</span>
+                )}
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                {HAIRSTYLES.map((h) => (
+                  <button
+                    key={h}
+                    onClick={() => setAvatarField("hairstyle", h)}
+                    className={`mono text-[10px] px-3 py-1.5 rounded border transition ${
+                      avatar.hairstyle === h
+                        ? "border-[#3DDBD9] text-[#3DDBD9]"
+                        : "border-[#2A3140] text-[#8B94A3] hover:border-[#3A4150]"
+                    }`}
+                  >
+                    {h}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className={avatarLocked ? "opacity-40 pointer-events-none" : ""}>
+              <div className="mono text-[10px] text-[#8B94A3] mb-1.5">SKIN TONE</div>
+              <div className="flex gap-2 flex-wrap">
+                {SKIN_TONES.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setAvatarField("skinTone", c)}
+                    className="w-6 h-6 rounded-full border-2 transition"
+                    style={{
+                      backgroundColor: c,
+                      borderColor: avatar.skinTone === c ? "#3DDBD9" : "transparent",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className={avatarLocked ? "opacity-40 pointer-events-none" : ""}>
+              <div className="mono text-[10px] text-[#8B94A3] mb-1.5">EYE COLOR</div>
+              <div className="flex gap-2 flex-wrap">
+                {EYE_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setAvatarField("eyeColor", c)}
+                    className="w-6 h-6 rounded-full border-2 transition"
+                    style={{
+                      backgroundColor: c,
+                      borderColor: avatar.eyeColor === c ? "#3DDBD9" : "transparent",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className={avatarLocked ? "opacity-40 pointer-events-none" : ""}>
+              <div className="mono text-[10px] text-[#8B94A3] mb-1.5">HAIR COLOR</div>
+              <div className="flex gap-2 flex-wrap">
+                {HAIR_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setAvatarField("hairColor", c)}
+                    className="w-6 h-6 rounded-full border-2 transition"
+                    style={{
+                      backgroundColor: c,
+                      borderColor: avatar.hairColor === c ? "#3DDBD9" : "transparent",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {!avatarLocked ? (
+              <button
+                onClick={confirmAvatar}
+                className="mono text-xs px-4 py-2 rounded border border-[#3DDBD9] text-[#3DDBD9] hover:bg-[#0F1218] transition"
+              >
+                CONFIRM AVATAR
+              </button>
+            ) : (
+              inventory.hairstyleChanges > 0 &&
+              !hairstyleEditUnlocked && (
+                <button
+                  onClick={useHairstyleChange}
+                  className="mono text-xs px-4 py-2 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+                >
+                  USE HAIRSTYLE CHANGE ({inventory.hairstyleChanges})
+                </button>
+              )
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Emblems — earned, never bought. Each climbs its own bronze-to-diamond ladder. */}
+      <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4 mt-4">
+        <div className="mono text-xs tracking-widest text-[#8B94A3] mb-3">EMBLEMS</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {ACHIEVEMENTS.map((a) => {
+            const currentTierIdx = unlockedEmblems[a.id] ?? -1;
+            const currentTier = currentTierIdx >= 0 ? TIERS[currentTierIdx] : null;
+            const nextThreshold =
+              currentTierIdx < TIERS.length - 1 ? a.thresholds[currentTierIdx + 1] : null;
+            return (
+              <div
+                key={a.id}
+                className={`px-3 py-2.5 rounded border ${
+                  currentTier
+                    ? "border-[#1E2430] bg-[#0F1218]"
+                    : "border-[#1E2430] bg-[#0F1218] opacity-50"
+                }`}
+              >
+                <div className="flex items-center gap-2 mb-1.5">
+                  {currentTier ? (
+                    <Sparkles size={14} color={currentTier.color} />
+                  ) : (
+                    <Lock size={14} color="#5A6272" />
+                  )}
+                  <span
+                    className="mono text-[11px] tracking-wide"
+                    style={{ color: currentTier ? currentTier.color : "#8B94A3" }}
+                  >
+                    {a.label}
+                    {currentTier ? ` — ${currentTier.label}` : ""}
+                  </span>
+                </div>
+                <div className="flex gap-1 mb-1.5">
+                  {TIERS.map((t, i) => (
+                    <div
+                      key={t.key}
+                      className="h-1 flex-1 rounded-full"
+                      style={{
+                        backgroundColor: i <= currentTierIdx ? t.color : "#1E2430",
+                      }}
+                    />
+                  ))}
+                </div>
+                <div className="mono text-[9px] text-[#5A6272]">
+                  {nextThreshold !== null
+                    ? `Next: ${TIERS[currentTierIdx + 1].label} at ${nextThreshold} ${a.metricLabel}`
+                    : currentTier
+                    ? "Max tier reached"
+                    : `Bronze at ${a.thresholds[0]} ${a.metricLabel}`}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Domain stats */}
+      <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4 mt-4">
+        <div className="mono text-xs tracking-widest text-[#8B94A3] mb-3">DOMAIN STATS</div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {DOMAINS.map((d) => (
+            <div key={d.key}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="mono text-[10px] tracking-wide" style={{ color: d.color }}>
+                  {d.label}
+                </span>
+                <span className="mono text-[10px] text-[#8B94A3]">{domainStats[d.key]}</span>
+              </div>
+              <div className="h-1.5 bg-[#1E2430] rounded-full overflow-hidden">
+                <div
+                  className="h-full transition-all duration-500"
+                  style={{
+                    width: `${Math.min(100, domainStats[d.key] * 10)}%`,
+                    backgroundColor: d.color,
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+        </>
+      )}
+
+      {activeTab === "quests" && (
+        <>
+      <div>
+        {/* Quest panel */}
+        <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="mono text-xs tracking-widest text-[#8B94A3]">DAILY QUEST</div>
+            {!questComplete && !penaltyActive && (
+              <div className="mono text-xs text-[#F2A93B]">{formatCountdown(dailyTimeLeft)}</div>
+            )}
+          </div>
+
+          <div className="space-y-2">
+              {DAILY_TASKS.map((task) => {
+                const domain = DOMAINS.find((d) => d.key === task.domain);
+                const isChecked = !!checked[task.id];
+                return (
+                  <button
+                    key={task.id}
+                    onClick={() => toggleTask(task)}
+                    disabled={questComplete}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded border border-[#1E2430] bg-[#0F1218] hover:border-[#2A3140] transition text-left disabled:opacity-60"
+                  >
+                    {isChecked ? (
+                      <CheckCircle2 size={18} color={domain.color} />
+                    ) : (
+                      <Circle size={18} color="#3A4150" />
+                    )}
+                    <span
+                      className={`text-sm flex-1 ${isChecked ? "text-[#8B94A3] line-through" : "text-[#D6DCE5]"}`}
+                    >
+                      {task.label}
+                    </span>
+                    <span
+                      className="mono text-[10px] tracking-wide"
+                      style={{ color: domain.color }}
+                    >
+                      {domain.label}
+                    </span>
+                  </button>
+                );
+              })}
+              <div className="mono text-[10px] text-[#8B94A3] pt-1">
+                {questProgress}/{DAILY_TASKS.length} complete
+              </div>
+              {questComplete && (
+                <div className="mono text-xs text-[#3DDBD9] pt-1">
+                  Quest cleared. Reset available on next cycle.
+                </div>
+              )}
+          </div>
+
+          {/* Locked future systems */}
+          <div className="mt-4">
+            <div className="flex items-center gap-2 px-3 py-2 rounded border border-[#1E2430] bg-[#0F1218] opacity-50">
+              <Sparkles size={14} color="#8B94A3" />
+              <span className="mono text-[10px] text-[#8B94A3]">Skills — locked</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Urgent Quests — surfaced from per-domain neglect, not from a schedule */}
+      {activeUrgentQuests.length > 0 && (
+        <div className="border border-[#2A2010] bg-[#161206] rounded-md p-4 mt-4">
+          <div className="mono text-xs tracking-widest text-[#F2A93B] mb-3">
+            URGENT QUESTS — {activeUrgentQuests.length} ACTIVE
+          </div>
+          <div className="space-y-2">
+            {activeUrgentQuests.map((q) => {
+              const domain = DOMAINS.find((d) => d.key === q.domain);
+              const severityColor =
+                q.severity === "severe"
+                  ? "#E5484D"
+                  : q.severity === "moderate"
+                  ? "#F2A93B"
+                  : "#D6DCE5";
+              return (
+                <div
+                  key={q.id}
+                  className="flex items-center justify-between gap-3 px-3 py-2.5 rounded border border-[#2A2010] bg-[#0F1218]"
+                >
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span
+                        className="mono text-[9px] tracking-widest px-1.5 py-0.5 rounded"
+                        style={{ color: severityColor, border: `1px solid ${severityColor}` }}
+                      >
+                        {q.severity.toUpperCase()}
+                      </span>
+                      <span
+                        className="mono text-[10px] tracking-wide"
+                        style={{ color: domain.color }}
+                      >
+                        {domain.label}
+                      </span>
+                    </div>
+                    <div className="text-sm text-[#D6DCE5]">{q.label}</div>
+                  </div>
+                  <button
+                    onClick={() => resolveUrgentQuest(q)}
+                    className="mono text-[10px] px-3 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5] shrink-0"
+                  >
+                    RESOLVE
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Manual Quests — player-authored, ad hoc */}
+      <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4 mt-4">
+        <div className="mono text-xs tracking-widest text-[#8B94A3] mb-3">MANUAL QUESTS</div>
+        <div className="flex flex-col sm:flex-row gap-2 mb-3">
+          <input
+            type="text"
+            value={newManualLabel}
+            onChange={(e) => setNewManualLabel(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addManualQuest()}
+            placeholder="e.g. Go to the gym today"
+            className="flex-1 mono text-xs bg-[#0F1218] border border-[#1E2430] rounded px-3 py-2 text-[#D6DCE5] placeholder-[#5A6272] focus:outline-none focus:border-[#3DDBD9]"
+          />
+          <select
+            value={newManualDomain}
+            onChange={(e) => setNewManualDomain(e.target.value)}
+            className="mono text-xs bg-[#0F1218] border border-[#1E2430] rounded px-2 py-2 text-[#D6DCE5] focus:outline-none focus:border-[#3DDBD9]"
+          >
+            {DOMAINS.map((d) => (
+              <option key={d.key} value={d.key}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={addManualQuest}
+            className="mono text-xs px-4 py-2 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+          >
+            ADD
+          </button>
+        </div>
+        {manualQuests.length === 0 ? (
+          <div className="mono text-[10px] text-[#5A6272]">No active manual quests.</div>
+        ) : (
+          <div className="space-y-2">
+            {manualQuests.map((q) => {
+              const domain = DOMAINS.find((d) => d.key === q.domain);
+              return (
+                <div
+                  key={q.id}
+                  className="flex items-center justify-between gap-3 px-3 py-2.5 rounded border border-[#1E2430] bg-[#0F1218]"
+                >
+                  <div className="flex items-center gap-2 flex-1">
+                    <span
+                      className="mono text-[10px] tracking-wide"
+                      style={{ color: domain.color }}
+                    >
+                      {domain.label}
+                    </span>
+                    <span className="text-sm text-[#D6DCE5]">{q.label}</span>
+                  </div>
+                  <button
+                    onClick={() => completeManualQuest(q)}
+                    className="mono text-[10px] px-3 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5] shrink-0"
+                  >
+                    COMPLETE
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Main Quests — one per domain, mandatory-feeling milestone objective */}
+      <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4 mt-4">
+        <div className="mono text-xs tracking-widest text-[#8B94A3] mb-3">MAIN QUESTS</div>
+        <div className="space-y-3">
+          {DOMAINS.map((d) => {
+            const q = mainQuests[d.key];
+            return (
+              <div
+                key={d.key}
+                className="px-3 py-2.5 rounded border border-[#1E2430] bg-[#0F1218]"
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className="mono text-[10px] tracking-wide w-24 shrink-0"
+                    style={{ color: d.color }}
+                  >
+                    {d.label}
+                  </span>
+                  {q.complete ? (
+                    <>
+                      <span className="text-sm text-[#8B94A3] line-through flex-1">
+                        {q.label}
+                      </span>
+                      <button
+                        onClick={() => resetMainQuest(d.key)}
+                        className="mono text-[10px] px-3 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5] shrink-0"
+                      >
+                        SET NEW
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        value={q.label}
+                        onChange={(e) => updateMainQuestLabel(d.key, e.target.value)}
+                        placeholder="Pick a suggestion below or write your own"
+                        className="flex-1 mono text-xs bg-transparent border-b border-[#1E2430] px-1 py-1 text-[#D6DCE5] placeholder-[#5A6272] focus:outline-none focus:border-[#3DDBD9]"
+                      />
+                      <button
+                        onClick={() => completeMainQuest(d.key)}
+                        className="mono text-[10px] px-3 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5] shrink-0"
+                      >
+                        COMPLETE
+                      </button>
+                    </>
+                  )}
+                </div>
+                {!q.complete && (
+                  <div className="flex gap-1.5 flex-wrap mt-2 pl-[104px]">
+                    {MAIN_QUEST_SUGGESTIONS[d.key].map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => updateMainQuestLabel(d.key, s)}
+                        className={`mono text-[9px] px-2 py-1 rounded border transition ${
+                          q.label === s
+                            ? "border-[#3DDBD9] text-[#3DDBD9]"
+                            : "border-[#2A3140] text-[#8B94A3] hover:border-[#3A4150]"
+                        }`}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+        </>
+      )}
+
+      {activeTab === "shop" && (
+        <>
+      {/* Shop — purely cosmetic. Placeholder color swatches stand in for real art. */}
+      <div className="border border-[#1E2430] bg-[#12151C] rounded-md p-4 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Store size={14} color="#8B94A3" />
+            <span className="mono text-xs tracking-widest text-[#8B94A3]">SHOP</span>
+          </div>
+          <span className="mono text-xs text-[#F2C94C]">{inventory.gold} Gold</span>
+        </div>
+        {renderShopSlot("head", HEAD_CATALOG, "HEAD")}
+        {renderShopSlot("upper", UPPER_CATALOG, "UPPER")}
+        {renderShopSlot("lower", LOWER_CATALOG, "LOWER")}
+        {renderShopLadder("ACCESSORY", ACCESSORY_TIERS, accessoryTier, buyAccessoryTier)}
+        {renderShopLadder("AURA", AURA_TIERS, auraTier, buyAuraTier)}
+        <div className="mono text-[9px] text-[#5A6272] mt-1">
+          Placeholder swatches — real art comes later, this is the mechanics layer.
+        </div>
+      </div>
+
+      {renderInventoryPanel()}
+
+        </>
+      )}
+
+      {activeTab === "debug" && (
+        <div className="border border-[#2A2010] bg-[#161206] rounded-md px-4 py-3 mb-4">
+          <div className="mono text-[10px] tracking-widest text-[#F2A93B] mb-2">
+            DEBUG — PROTOTYPE ONLY
+          </div>
+          {!resetArmed ? (
+            <button
+              onClick={() => setResetArmed(true)}
+              className="mono text-xs px-4 py-2 rounded border border-[#E5484D] text-[#E5484D] hover:bg-[#0F1218] transition"
+            >
+              RESET ALL PROGRESS
+            </button>
+          ) : (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="mono text-xs text-[#E5484D]">
+                Wipes save + all state. Confirm?
+              </span>
+              <button
+                onClick={debugReset}
+                className="mono text-xs px-3 py-1.5 rounded border border-[#E5484D] bg-[#E5484D] text-[#0B0D12]"
+              >
+                YES, WIPE IT
+              </button>
+              <button
+                onClick={() => setResetArmed(false)}
+                className="mono text-xs px-3 py-1.5 rounded border border-[#2A3140] text-[#D6DCE5]"
+              >
+                CANCEL
+              </button>
+            </div>
+          )}
+
+          {/* Run the ACTUAL trigger against real, currently-committed game state — not a
+              synthetic scenario. If it fires, a real Urgent Quest appears, same as if a
+              real cycle had just ended. */}
+          <div className="mt-3 pt-3 border-t border-[#2A2010]">
+            <div className="mono text-[10px] text-[#8B94A3] mb-2">
+              RUN TRIGGER ON CURRENT STATE
+            </div>
+            <div className="mono text-[9px] text-[#5A6272] mb-2">
+              Cap this cycle: {urgentQuestsThisCycle}/{URGENT_QUESTS_PER_CYCLE_CAP} used
+              {urgentQuestsThisCycle >= URGENT_QUESTS_PER_CYCLE_CAP && (
+                <span className="text-[#E5484D]"> — real triggers blocked until next daily cycle</span>
+              )}
+            </div>
+            {(() => {
+              const eligible = getCurrentEligibleDomains();
+              return (
+                <>
+                  <div className="mono text-[9px] text-[#5A6272] mb-2 space-y-0.5">
+                    {eligible.length === 0 ? (
+                      <div>No domain currently eligible (nothing past a neglect/stagnation threshold).</div>
+                    ) : (
+                      eligible.map((e) => (
+                        <div key={e.domain.key} className="flex justify-between">
+                          <span style={{ color: e.domain.color }}>{e.domain.label}</span>
+                          <span>
+                            {e.severity} ({e.reason})
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="mono text-[8px] text-[#5A6272] mb-2 border-t border-[#1E2430] pt-1.5 space-y-0.5">
+                    <div className="text-[#8B94A3]">
+                      Level {level} · {totalCyclesCompleted} real Daily Quest cycle
+                      {totalCyclesCompleted !== 1 ? "s" : ""} completed
+                    </div>
+                    <div className="text-[#8B94A3]">
+                      Neglect = level-up checkpoints without a stat point (thresholds 3/5/8).
+                      Stagnation = Main Quests completed vs. the domain in the lead (thresholds 2/4/6).
+                    </div>
+                    {DOMAINS.map((d) => (
+                      <div key={d.key} className="flex justify-between">
+                        <span style={{ color: d.color }}>{d.label}</span>
+                        <span>
+                          neglect {domainPointsMissedStreak[d.key] || 0} · main quests{" "}
+                          {domainMainQuestsSinceReset[d.key] || 0}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
+            <button
+              onClick={runTriggerOnCurrentState}
+              className="mono text-[10px] px-3 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+            >
+              RUN TRIGGER NOW
+            </button>
+            {debugTriggerResult && (
+              <div
+                className="mono text-[9px] mt-2 px-2 py-1.5 rounded border"
+                style={{
+                  borderColor: debugTriggerResult.fired ? "#3DDBD9" : "#2A3140",
+                  color: debugTriggerResult.fired ? "#3DDBD9" : "#8B94A3",
+                }}
+              >
+                {debugTriggerResult.fired
+                  ? `FIRED — ${debugTriggerResult.picked.domain.label} (${debugTriggerResult.picked.severity}): ${debugTriggerResult.questLabel}`
+                  : `NO FIRE — ${debugTriggerResult.reason}`}
+              </div>
+            )}
+            <div className="mono text-[9px] text-[#5A6272] mt-1">
+              Real state, real consequences if it fires — but this button intentionally
+              bypasses the per-cycle cap above, since it's a testing tool, not a real
+              level-up event.
+            </div>
+          </div>
+
+          {/* Urgent Quest trigger simulator — tests the chance-gate + severity-weighted
+              pick against synthetic scenarios, not real game state. */}
+          <div className="mt-3 pt-3 border-t border-[#2A2010]">
+            <div className="mono text-[10px] text-[#8B94A3] mb-2">
+              URGENT TRIGGER SIMULATOR (1000 rolls per scenario)
+            </div>
+            <div className="flex gap-2 flex-wrap mb-2">
+              <button
+                onClick={() => runUrgentTriggerSimulation("0 eligible domains", [])}
+                className="mono text-[9px] px-2 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+              >
+                0 Eligible
+              </button>
+              <button
+                onClick={() =>
+                  runUrgentTriggerSimulation("1 eligible (severe)", [
+                    { domain: DOMAINS[0], severity: "severe" },
+                  ])
+                }
+                className="mono text-[9px] px-2 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+              >
+                1 Eligible (Severe)
+              </button>
+              <button
+                onClick={() =>
+                  runUrgentTriggerSimulation("3 eligible (mixed severity)", [
+                    { domain: DOMAINS[0], severity: "severe" },
+                    { domain: DOMAINS[1], severity: "moderate" },
+                    { domain: DOMAINS[2], severity: "mild" },
+                  ])
+                }
+                className="mono text-[9px] px-2 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+              >
+                3 Eligible (Mixed)
+              </button>
+              <button
+                onClick={() =>
+                  runUrgentTriggerSimulation(
+                    "6 eligible (all severe)",
+                    DOMAINS.map((d) => ({ domain: d, severity: "severe" }))
+                  )
+                }
+                className="mono text-[9px] px-2 py-1.5 rounded border border-[#2A3140] hover:border-[#3DDBD9] transition text-[#D6DCE5]"
+              >
+                6 Eligible (All Severe)
+              </button>
+            </div>
+
+            {simResults && (
+              <div className="mono text-[10px] text-[#D6DCE5] bg-[#0F1218] border border-[#1E2430] rounded px-3 py-2 space-y-1">
+                <div className="text-[#8B94A3]">{simResults.scenarioLabel}</div>
+                <div>
+                  Fired: {simResults.firedCount}/{simResults.iterations} (
+                  {((simResults.firedCount / simResults.iterations) * 100).toFixed(1)}% — target ~
+                  {(URGENT_TRIGGER_CHANCE * 100).toFixed(0)}%)
+                </div>
+                {simResults.eligible.length > 0 && simResults.firedCount > 0 && (
+                  <div className="pt-1 space-y-0.5">
+                    {simResults.eligible.map((e) => {
+                      const count = simResults.pickCounts[e.domain.key] || 0;
+                      const totalWeight = simResults.eligible.reduce(
+                        (sum, x) => sum + SEVERITY_WEIGHT[x.severity],
+                        0
+                      );
+                      const expectedPct = ((SEVERITY_WEIGHT[e.severity] / totalWeight) * 100).toFixed(1);
+                      const actualPct = ((count / simResults.firedCount) * 100).toFixed(1);
+                      return (
+                        <div key={e.domain.key} className="flex justify-between">
+                          <span style={{ color: e.domain.color }}>
+                            {e.domain.label} ({e.severity})
+                          </span>
+                          <span className="text-[#5A6272]">
+                            {count} picks — {actualPct}% actual / {expectedPct}% expected
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+try {
+  const root = ReactDOM.createRoot(document.getElementById("root"));
+  root.render(<SystemEngine />);
+} catch (err) {
+  const diag = document.getElementById("diag");
+  diag.style.display = "block";
+  diag.textContent += "[render error] " + (err && err.message ? err.message : err) + "\n" + (err && err.stack ? err.stack : "") + "\n\n";
+}
+</script>
+</body>
+</html>
